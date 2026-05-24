@@ -19,7 +19,7 @@ export interface BridgeOptions {
   softLimit: number;
   hardLimit: number;
   currency: string;
-  getRule: () => RuleFunction;
+  rule: RuleFunction;
 }
 
 // The set of intercepts the budgeter declares to the daemon. Kept in one
@@ -59,7 +59,7 @@ export class BudgeterBridge {
     });
     this.enforcer = new Enforcer(this.client, log);
     this.router = new EventRouter(
-      opts.getRule(),
+      opts.rule,
       this.tracker,
       this.enforcer,
       log,
@@ -81,10 +81,6 @@ export class BudgeterBridge {
     }
     this.stopped = true;
     this.client.stop();
-  }
-
-  refreshRule(): void {
-    this.router.setRule(this.opts.getRule());
   }
 
   private onRequest(r: JsonRpcRequest): void {

@@ -16,21 +16,14 @@ export interface SessionMeta {
 // transformer process holds one connection for every session, so the
 // router keeps a sessionId → SessionMeta map.
 export class EventRouter {
-  private rule: RuleFunction;
   private metas = new Map<string, SessionMeta>();
 
   constructor(
-    rule: RuleFunction,
+    private readonly rule: RuleFunction,
     private readonly tracker: CostTracker,
     private readonly enforcer: Enforcer,
     private readonly log: Logger,
-  ) {
-    this.rule = rule;
-  }
-
-  setRule(rule: RuleFunction): void {
-    this.rule = rule;
-  }
+  ) {}
 
   setMeta(sessionId: string, meta: SessionMeta): void {
     this.metas.set(sessionId, meta);

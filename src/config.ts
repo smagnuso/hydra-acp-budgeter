@@ -1,14 +1,7 @@
-import { homedir } from "node:os";
-import { resolve } from "node:path";
-
 export interface Config {
   hydraDaemonUrl: string;
   hydraWsUrl: string;
   hydraToken: string;
-  // Absolute path to the user's budgeter-config JS module
-  // (~/.hydra-acp/budgeter.config.js by default). Falls back to
-  // DEFAULT_RULE when the file doesn't exist.
-  ruleConfigPath: string;
   // Spend thresholds in the configured currency. Soft fires warnings;
   // hard rejects prompts and warns on session_opened.
   softLimit: number;
@@ -60,9 +53,6 @@ export function loadConfig(): Config {
   }
   const hydraWsUrl =
     process.env.HYDRA_ACP_WS_URL ?? deriveWsUrl(hydraDaemonUrl);
-  const ruleConfigPath =
-    process.env.HYDRA_ACP_BUDGETER_CONFIG ??
-    resolve(homedir(), ".hydra-acp", "budgeter.config.js");
 
   const softLimit = numEnv("HYDRA_ACP_BUDGETER_SOFT", 5);
   const hardLimit = numEnv("HYDRA_ACP_BUDGETER_HARD", 10);
@@ -76,7 +66,6 @@ export function loadConfig(): Config {
     hydraDaemonUrl,
     hydraWsUrl,
     hydraToken,
-    ruleConfigPath,
     softLimit,
     hardLimit,
     currency: process.env.HYDRA_ACP_BUDGETER_CURRENCY ?? "USD",

@@ -1,10 +1,4 @@
-import { stat } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
-import { logger } from "./util/log.js";
-
-const log = logger("rule");
-
-// The shape passed to the user's rule function. Mirrors the notifier's
+// The shape passed to the rule function. Mirrors the notifier's
 // NotifyEvent in spirit — a per-event view augmented with cached session
 // meta and current budget state so the rule can decide what to do
 // without reaching back into hydra.
@@ -85,7 +79,7 @@ function fmtMoney(amount: number, currency: string): string {
   return `${fixed} ${currency}`;
 }
 
-// Default rule when no config file is present. Strategy:
+// The rule the budgeter runs on every event. Strategy:
 //   - threshold_cross to "soft": warn (one-shot, the tracker only fires
 //     crosses once per transition)
 //   - threshold_cross to "hard": warn (also one-shot)
@@ -93,7 +87,7 @@ function fmtMoney(amount: number, currency: string): string {
 //     and an explanation in the message
 //   - session_opened in "hard" state: warn the new session so the user
 //     understands why their next prompt will bounce
-//   - usage_update and session_closed: do nothing by default
+//   - usage_update and session_closed: do nothing
 export const DEFAULT_RULE: RuleFunction = (ev) => {
   const { budget } = ev;
   const totalStr = fmtMoney(budget.total, budget.currency);
@@ -142,36 +136,3 @@ export const DEFAULT_RULE: RuleFunction = (ev) => {
 
   return null;
 };
-
-let loadCounter = 0;
-
-export async function loadRule(path: string): Promise<RuleFunction> {
-  try {
-    await stat(path);
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException;
-    if (e.code === "ENOENT") {
-      log.info(
-        `no rule config at ${path} — using DEFAULT_RULE (warn on soft cross, reject prompts when over hard)`,
-      );
-      return DEFAULT_RULE;
-    }
-    log.warn(`stat ${path} failed: ${e.message}; using DEFAULT_RULE`);
-    return DEFAULT_RULE;
-  }
-  loadCounter += 1;
-  const url = `${pathToFileURL(path).href}?v=${Date.now()}-${loadCounter}`;
-  try {
-    const mod = (await import(url)) as { default?: unknown };
-    const fn = mod.default;
-    if (typeof fn !== "function") {
-      log.warn(`${path} did not export a default function; using DEFAULT_RULE`);
-      return DEFAULT_RULE;
-    }
-    log.info(`loaded budgeter rule from ${path}`);
-    return fn as RuleFunction;
-  } catch (err) {
-    log.warn(`import ${path} failed: ${(err as Error).message}; using DEFAULT_RULE`);
-    return DEFAULT_RULE;
-  }
-}

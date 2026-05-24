@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.js";
 import { BudgeterBridge } from "./bridge.js";
-import { DEFAULT_RULE, loadRule, type RuleFunction } from "./rule.js";
+import { DEFAULT_RULE } from "./rule.js";
 import { logger, setDebug } from "./util/log.js";
 
 const log = logger("main");
@@ -31,31 +31,15 @@ async function main(): Promise<void> {
   const config = loadConfig();
   setDebug(config.debug);
 
-  let currentRule: RuleFunction = DEFAULT_RULE;
-  currentRule = await loadRule(config.ruleConfigPath);
-
   const bridge = new BudgeterBridge({
     daemonWsUrl: config.hydraWsUrl,
     token: config.hydraToken,
     softLimit: config.softLimit,
     hardLimit: config.hardLimit,
     currency: config.currency,
-    getRule: () => currentRule,
+    rule: DEFAULT_RULE,
   });
   bridge.start();
-
-  process.on("SIGHUP", () => {
-    log.info(`SIGHUP — reloading rule from ${config.ruleConfigPath}`);
-    loadRule(config.ruleConfigPath)
-      .then((rule) => {
-        currentRule = rule;
-        bridge.refreshRule();
-        log.info("rule reload complete");
-      })
-      .catch((err: unknown) => {
-        log.warn(`rule reload failed: ${(err as Error).message}`);
-      });
-  });
 
   const shutdown = (sig: string): void => {
     log.info(`${sig} received — shutting down`);
@@ -66,7 +50,7 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
   log.info(
-    `hydra-acp-budgeter up; daemon=${config.hydraDaemonUrl} soft=${config.softLimit} hard=${config.hardLimit} ${config.currency} rule=${config.ruleConfigPath}`,
+    `hydra-acp-budgeter up; daemon=${config.hydraDaemonUrl} soft=${config.softLimit} hard=${config.hardLimit} ${config.currency}`,
   );
 }
 

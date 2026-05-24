@@ -61,7 +61,7 @@ vars set: `HYDRA_ACP_DAEMON_URL`, `HYDRA_ACP_TOKEN`, `HYDRA_ACP_WS_URL`,
 `hydra-acp transformers start|stop|restart hydra-acp-budgeter` and
 `hydra-acp transformers logs hydra-acp-budgeter -f` to tail.
 
-## Default behavior (no config)
+## Behavior
 
 Tracks each session's running cost from `usage_update` events (the `cost.amount` the agent reports, or `_meta.hydra-acp.cumulativeCost` when present), sums across sessions, and acts at two thresholds:
 
@@ -99,96 +99,6 @@ Reset is currently "restart the transformer" — the per-session cost map is in-
 hydra-acp transformers restart hydra-acp-budgeter
 ```
 
-## Configure
-
-`~/.hydra-acp/budgeter.config.js` (override path via `HYDRA_ACP_BUDGETER_CONFIG`). Default-exports a function that decides per event:
-
-```js
-// ~/.hydra-acp/budgeter.config.js
-export default function budget(ev) {
-  // ev.kind: "usage_update" | "prompt_request" | "session_opened" |
-  //          "session_closed" | "threshold_cross"
-  // ev.sessionId, ev.meta.cwd, ev.meta.agentId, ev.meta.title
-  // ev.budget: { total, perSession, currency, soft, hard, state }
-  //   state ∈ "ok" | "soft" | "hard"
-  // ev.raw: for usage_update kinds, the update payload;
-  //         for prompt_request, { envelope };
-  //         for threshold_cross, { from, to };
-  //         else, {}.
-
-  // Don't warn on the named-test sessions:
-  if (ev.meta.title?.startsWith("test:")) return null;
-
-  if (ev.kind === "threshold_cross" && ev.raw.to === "soft") {
-    return {
-      warn: {
-        title: `💸 Halfway to your budget`,
-        body: `You've spent ${ev.budget.total.toFixed(2)} ${ev.budget.currency} (limit ${ev.budget.hard}).`,
-      },
-    };
-  }
-
-  if (ev.kind === "prompt_request" && ev.budget.state === "hard") {
-    return {
-      reject: {
-        message: `Budget cap reached. Bump HYDRA_ACP_BUDGETER_HARD to continue.`,
-        stopReason: "refusal",
-      },
-    };
-  }
-
-  return null;
-}
-```
-
-### Event shape
-
-```ts
-interface BudgetEvent {
-  sessionId: string;
-  kind:
-    | "usage_update"
-    | "prompt_request"
-    | "session_opened"
-    | "session_closed"
-    | "threshold_cross";
-  raw: Record<string, unknown>;
-  meta: { cwd?: string; agentId?: string; title?: string };
-  budget: {
-    total: number;       // sum across every session the budgeter has seen
-    perSession: number;  // this session's contribution
-    currency: string;
-    soft: number;
-    hard: number;
-    state: "ok" | "soft" | "hard";
-  };
-}
-```
-
-### Verdict shape
-
-```ts
-interface BudgetVerdict {
-  // Emit a warning agent_message_chunk to every client attached to the session.
-  warn?: { title: string; body?: string };
-  // Only meaningful on prompt_request — turns session/prompt into a stop
-  // with the given message. stopReason defaults to "refusal".
-  reject?: { message: string; stopReason?: string };
-}
-```
-
-Return `null` / `undefined` to skip. Throws are caught + logged + treated as skip.
-
-### Reload
-
-After editing `budgeter.config.js`:
-
-```sh
-hydra-acp transformers restart hydra-acp-budgeter
-```
-
-(Or `kill -HUP <pid>` for a no-restart reload — the process re-imports the rule on `SIGHUP`.)
-
 ## Environment
 
 | Env var | Default | Purpose |
@@ -196,7 +106,6 @@ hydra-acp transformers restart hydra-acp-budgeter
 | `HYDRA_ACP_DAEMON_URL` | `http://127.0.0.1:8765` | Daemon HTTP endpoint (injected by hydra) |
 | `HYDRA_ACP_TOKEN` | *(required)* | Daemon auth token (injected by hydra) |
 | `HYDRA_ACP_WS_URL` | derived | Override WS endpoint |
-| `HYDRA_ACP_BUDGETER_CONFIG` | `~/.hydra-acp/budgeter.config.js` | Rule module path |
 | `HYDRA_ACP_BUDGETER_SOFT` | `5` | Soft limit (warning threshold) in `HYDRA_ACP_BUDGETER_CURRENCY` |
 | `HYDRA_ACP_BUDGETER_HARD` | `10` | Hard limit (rejection threshold). Must be ≥ soft. |
 | `HYDRA_ACP_BUDGETER_CURRENCY` | `USD` | Currency code used when formatting messages |
