@@ -60,23 +60,31 @@ export type RuleFunction = (
   ev: BudgetEvent,
 ) => BudgetVerdict | null | undefined | Promise<BudgetVerdict | null | undefined>;
 
-const SESSION_ID_PREFIX = "hydra_session_";
-
-function shortSessionId(sessionId: string): string {
-  const stripped = sessionId.startsWith(SESSION_ID_PREFIX)
-    ? sessionId.slice(SESSION_ID_PREFIX.length)
-    : sessionId;
-  return stripped.slice(0, 8);
-}
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  USD: "$",
+  EUR: "€",
+  GBP: "£",
+  JPY: "¥",
+  CNY: "¥",
+  CAD: "C$",
+  AUD: "A$",
+  NZD: "NZ$",
+  CHF: "CHF ",
+  HKD: "HK$",
+  SGD: "S$",
+  INR: "₹",
+  KRW: "₩",
+  BRL: "R$",
+  MXN: "MX$",
+};
 
 function fmtMoney(amount: number, currency: string): string {
-  // Three-letter ISO codes render cleanly; anything else (e.g. "credits")
-  // gets a plain "<amount> <unit>" rendering.
   const fixed = amount.toFixed(2);
-  if (currency.length === 3 && currency.toUpperCase() === currency) {
-    return `${currency} ${fixed}`;
+  const sym = CURRENCY_SYMBOLS[currency.toUpperCase()];
+  if (sym) {
+    return `${sym}${fixed}`;
   }
-  return `${fixed} ${currency}`;
+  return `${currency} ${fixed}`;
 }
 
 // The rule the budgeter runs on every event. Strategy:
@@ -93,22 +101,13 @@ export const DEFAULT_RULE: RuleFunction = (ev) => {
   const totalStr = fmtMoney(budget.total, budget.currency);
   const softStr = fmtMoney(budget.soft, budget.currency);
   const hardStr = fmtMoney(budget.hard, budget.currency);
-  const sid = shortSessionId(ev.sessionId);
 
   if (ev.kind === "threshold_cross") {
     const to = (ev.raw.to ?? "ok") as BudgetState;
-    if (to === "soft") {
-      return {
-        warn: {
-          title: `💰 Budget soft limit hit · ${sid}`,
-          body: `Spent ${totalStr} of ${softStr} soft (hard: ${hardStr}). Heads up — prompts will be rejected at the hard limit.`,
-        },
-      };
-    }
     if (to === "hard") {
       return {
         warn: {
-          title: `🛑 Budget hard limit hit · ${sid}`,
+          title: `🛑 Budget hard limit hit`,
           body: `Spent ${totalStr} ≥ ${hardStr} hard limit. Further prompts will be rejected until the budget is reset.`,
         },
       };
@@ -116,8 +115,25 @@ export const DEFAULT_RULE: RuleFunction = (ev) => {
     return null;
   }
 
+  // Warn on every turn that reports a cost while over the soft limit.
+  if (ev.kind === "usage_update" && budget.state !== "ok" && typeof (ev.raw.cost as Record<string, unknown> | undefined)?.amount === "number") {
+    const label = budget.state === "hard" ? "🛑 Over hard limit" : "💰 Over soft limit";
+    return {
+      warn: {
+        title: `${label} · ${totalStr} spent`,
+        body: budget.state === "hard"
+          ? `Hard limit ${hardStr} reached. Prompts will be rejected until budget is reset.`
+          : `Soft limit ${softStr} reached (hard: ${hardStr}).`,
+      },
+    };
+  }
+
   if (ev.kind === "prompt_request" && budget.state === "hard") {
     return {
+      warn: {
+        title: `🛑 Prompt blocked — budget exceeded`,
+        body: `Spent ${totalStr} ≥ ${hardStr} hard limit. Reset the budget or raise HYDRA_ACP_BUDGETER_HARD to continue.`,
+      },
       reject: {
         message: `Budget exceeded: spent ${totalStr} ≥ ${hardStr} hard limit. Reset the budget or raise HYDRA_ACP_BUDGETER_HARD to continue.`,
         stopReason: "refusal",
@@ -128,7 +144,7 @@ export const DEFAULT_RULE: RuleFunction = (ev) => {
   if (ev.kind === "session_opened" && budget.state === "hard") {
     return {
       warn: {
-        title: `🛑 Session opened over budget · ${sid}`,
+        title: `🛑 Session opened over budget`,
         body: `Total spend ${totalStr} ≥ ${hardStr}. Prompts on this session will be rejected.`,
       },
     };

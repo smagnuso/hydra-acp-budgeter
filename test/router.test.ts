@@ -42,7 +42,7 @@ test("ok state: usage_update tick does not emit anything", async () => {
   assert.equal(capture.requests.length, 0);
 });
 
-test("crossing soft fires exactly one warn via emit_message", async () => {
+test("cost-bearing tick over soft fires a warn via emit_message", async () => {
   const { router, capture } = makeRouter();
   await router.onResponseUpdate("s1", usage(2));
   await router.onResponseUpdate("s1", usage(5));
@@ -55,19 +55,19 @@ test("crossing soft fires exactly one warn via emit_message", async () => {
   assert.equal(p.envelope.update.sessionUpdate, "agent_message_chunk");
 });
 
-test("crossing hard fires a second warn (one-shot per transition)", async () => {
+test("crossing hard fires an extra warn from threshold_cross", async () => {
   const { router, capture } = makeRouter();
-  await router.onResponseUpdate("s1", usage(5));
-  await router.onResponseUpdate("s1", usage(10));
-  assert.equal(capture.requests.length, 2);
+  await router.onResponseUpdate("s1", usage(5));  // 1 warn: usage_update in soft
+  await router.onResponseUpdate("s1", usage(10)); // 2 warns: threshold_cross hard + usage_update in hard
+  assert.equal(capture.requests.length, 3);
 });
 
-test("subsequent ticks within the same tier do not re-warn", async () => {
+test("each cost-bearing tick over soft re-warns (per-turn reminders)", async () => {
   const { router, capture } = makeRouter();
-  await router.onResponseUpdate("s1", usage(5));
-  await router.onResponseUpdate("s1", usage(6));
-  await router.onResponseUpdate("s1", usage(7));
-  assert.equal(capture.requests.length, 1);
+  await router.onResponseUpdate("s1", usage(5)); // warn
+  await router.onResponseUpdate("s1", usage(6)); // warn
+  await router.onResponseUpdate("s1", usage(7)); // warn
+  assert.equal(capture.requests.length, 3);
 });
 
 test("prompt_request below hard limit continues (no reject payload)", async () => {

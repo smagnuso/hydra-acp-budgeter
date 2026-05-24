@@ -200,6 +200,25 @@ test("adoptFromDisk picks up externally rewritten state", () => {
   }
 });
 
+test("adoptFromDisk leaves currentState unchanged so consumeStateTransition detects the crossing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "budgeter-state-"));
+  try {
+    const path = join(dir, "state.json");
+    const t = makePersistedTracker(path);
+    t.applyUsageUpdate("s1", usage(2));
+    assert.equal(t.consumeStateTransition(), undefined);
+    // External edit bumps total above soft limit.
+    const overwritten = { version: 1, sessions: { s1: { cost: 7, currency: "USD" } } };
+    writeFileSync(path, JSON.stringify(overwritten), "utf8");
+    t.adoptFromDisk();
+    assert.equal(t.snapshotFor("s1").total, 7);
+    // currentState was NOT advanced — consumeStateTransition should detect ok→soft.
+    assert.equal(t.consumeStateTransition(), "soft");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("adoptFromDisk is a no-op when the file matches what we wrote", () => {
   const dir = mkdtempSync(join(tmpdir(), "budgeter-state-"));
   try {

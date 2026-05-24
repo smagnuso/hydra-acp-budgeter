@@ -24,16 +24,8 @@ function readVersion(): string {
 }
 
 function runReset(): void {
-  const path = stateFilePath();
-  const removed = deleteStateFile(path);
-  if (removed) {
-    process.stdout.write(`Removed ${path}\n`);
-    process.stdout.write(
-      "If hydra-acp-budgeter is running, it will pick this up via fs.watch.\n",
-    );
-  } else {
-    process.stdout.write(`No state file at ${path}; nothing to reset.\n`);
-  }
+  deleteStateFile(stateFilePath());
+  process.stdout.write("hydra-acp-budgeter accumulated cost reset\n");
 }
 
 async function runTransformer(): Promise<void> {

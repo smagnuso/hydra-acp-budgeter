@@ -159,7 +159,9 @@ export class CostTracker {
     if (raw === this.lastWrittenJson) {
       return false;
     }
-    const adopted = this.applyPersisted(raw);
+    // Don't advance currentState — leave it at the pre-load value so
+    // consumeStateTransition detects any upward crossing on the next tick.
+    const adopted = this.applyPersisted(raw, false);
     if (adopted) {
       this.lastWrittenJson = raw;
       log.info(`adopted state from disk (total=${this.totalCost().toFixed(2)})`);
@@ -189,7 +191,7 @@ export class CostTracker {
     }
   }
 
-  private applyPersisted(raw: string): boolean {
+  private applyPersisted(raw: string, updateState = true): boolean {
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
@@ -217,11 +219,13 @@ export class CostTracker {
         });
       }
     }
-    this.currentState = deriveState(
-      this.totalCost(),
-      this.opts.softLimit,
-      this.opts.hardLimit,
-    );
+    if (updateState) {
+      this.currentState = deriveState(
+        this.totalCost(),
+        this.opts.softLimit,
+        this.opts.hardLimit,
+      );
+    }
     return true;
   }
 

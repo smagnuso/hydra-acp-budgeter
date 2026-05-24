@@ -27,7 +27,7 @@ export class Enforcer {
     sessionId: string,
     warn: { title: string; body?: string },
   ): Promise<void> {
-    const text = warn.body ? `${warn.title}\n${warn.body}` : warn.title;
+    const text = warn.body ? `\n\n${warn.title}\n${warn.body}\n\n` : `\n\n${warn.title}\n\n`;
     const envelope = {
       sessionId,
       update: {
