@@ -8,10 +8,6 @@ function hydraHome(): string {
   return process.env.HYDRA_ACP_HOME ?? resolve(homedir(), ".hydra-acp");
 }
 
-export function transformerName(): string {
-  return process.env.HYDRA_ACP_TRANSFORMER_NAME ?? "hydra-acp-budgeter";
-}
-
-export function stateFilePath(name = transformerName()): string {
-  return resolve(hydraHome(), "transformers", `${name}.state.json`);
+export function stateFilePath(): string {
+  return resolve(hydraHome(), "budgeter-cost.json");
 }

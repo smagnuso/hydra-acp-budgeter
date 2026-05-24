@@ -66,8 +66,10 @@ export class CostTracker {
     sessionId: string,
     update: Record<string, unknown>,
   ): TrackerSnapshot {
+    log.debug(`usage_update session=${sessionId.slice(0, 12)} raw=${JSON.stringify(update).slice(0, 200)}`);
     const cost = readCost(update);
     if (cost === undefined) {
+      log.debug(`readCost returned undefined for session=${sessionId.slice(0, 12)}`);
       return this.snapshotFor(sessionId);
     }
     const prior = this.sessions.get(sessionId) ?? { cost: 0, currency: undefined };
