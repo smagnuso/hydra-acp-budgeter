@@ -149,17 +149,21 @@ test("a fresh tracker loads persisted state from disk", () => {
   }
 });
 
-test("reset on persisted tracker rewrites file with empty sessions", () => {
+test("reset on persisted tracker baselines sessions so total reads zero", () => {
   const dir = mkdtempSync(join(tmpdir(), "budgeter-state-"));
   try {
     const path = join(dir, "state.json");
     const t = makePersistedTracker(path);
     t.applyUsageUpdate("s1", usage(3));
     t.reset();
+    // Total should read zero — effective spend = max(0, cost - baseline) = 0.
+    assert.equal(t.snapshotFor("s1").total, 0);
+    // File should have baseline = cost so a fresh process also starts at zero.
     const parsed = JSON.parse(readFileSync(path, "utf8")) as {
-      sessions: Record<string, unknown>;
+      sessions: Record<string, { cost: number; baseline: number }>;
     };
-    assert.deepEqual(parsed.sessions, {});
+    assert.equal(parsed.sessions.s1!.baseline, 3);
+    assert.equal(parsed.sessions.s1!.cost, 3);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -37,6 +37,9 @@ interface PerSessionState {
   // Highest observed running cost. Resets on resurrect would otherwise
   // make the sum dip; clamping with max keeps the total non-decreasing.
   cost: number;
+  // Cost at the last reset. Effective spend = max(0, cost - baseline).
+  // Allows reset without needing to discard the agent's running total.
+  baseline: number;
   // Mirror of the agent's reported currency for the latest update. Used
   // for cross-checking — if a session reports a currency different from
   // our configured one, we log a warning but keep summing.
@@ -72,9 +75,10 @@ export class CostTracker {
       log.debug(`readCost returned undefined for session=${sessionId.slice(0, 12)}`);
       return this.snapshotFor(sessionId);
     }
-    const prior = this.sessions.get(sessionId) ?? { cost: 0, currency: undefined };
+    const prior = this.sessions.get(sessionId) ?? { cost: 0, baseline: 0, currency: undefined };
     const next: PerSessionState = {
       cost: Math.max(prior.cost, cost.amount),
+      baseline: prior.baseline,
       currency: cost.currency ?? prior.currency,
     };
     this.sessions.set(sessionId, next);
@@ -89,7 +93,7 @@ export class CostTracker {
     const total = this.totalCost();
     return {
       total,
-      perSession: per?.cost ?? 0,
+      perSession: per ? Math.max(0, per.cost - per.baseline) : 0,
       currency: per?.currency ?? this.opts.currency,
       soft: this.opts.softLimit,
       hard: this.opts.hardLimit,
@@ -120,14 +124,18 @@ export class CostTracker {
     return this.currentState;
   }
 
-  // Zero everything in memory and persist (or remove) the state file.
-  // Used by the SIGUSR1-style flow when a user runs `hydra-acp-budgeter
-  // reset` while the transformer process is alive, and by adoptFromDisk
-  // when an external reset deleted the file.
+  // Baseline all sessions from their current cost so effective spend
+  // reads zero without discarding the agent's running total.
   reset(): void {
-    this.sessions.clear();
-    this.currentState = "ok";
+    this.baselineFromCurrent();
     this.persist();
+  }
+
+  private baselineFromCurrent(): void {
+    for (const [id, s] of this.sessions) {
+      this.sessions.set(id, { ...s, baseline: s.cost });
+    }
+    this.currentState = "ok";
   }
 
   // Re-read the state file and replace in-memory state if it changed
@@ -143,13 +151,14 @@ export class CostTracker {
     } catch (err) {
       const e = err as NodeJS.ErrnoException;
       if (e.code === "ENOENT") {
-        // External deletion = reset.
+        // File deleted = reset. Baseline all sessions from current cost
+        // so effective spend reads zero without discarding the agent's
+        // running total (it will keep reporting the same numbers).
         if (this.sessions.size === 0) {
           return false;
         }
-        log.info("state file removed externally — resetting in-memory total");
-        this.sessions.clear();
-        this.currentState = "ok";
+        log.info("state file removed externally — baselining from current totals");
+        this.baselineFromCurrent();
         this.lastWrittenJson = "";
         return true;
       }
@@ -215,6 +224,7 @@ export class CostTracker {
         const v = val as PerSessionState;
         this.sessions.set(id, {
           cost: v.cost,
+          baseline: typeof v.baseline === "number" ? v.baseline : 0,
           currency: typeof v.currency === "string" ? v.currency : undefined,
         });
       }
@@ -255,7 +265,7 @@ export class CostTracker {
   private totalCost(): number {
     let sum = 0;
     for (const s of this.sessions.values()) {
-      sum += s.cost;
+      sum += Math.max(0, s.cost - s.baseline);
     }
     return sum;
   }
