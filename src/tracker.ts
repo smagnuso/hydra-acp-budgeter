@@ -1,9 +1,18 @@
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import type { BudgetState } from "./rule.js";
+import { logger } from "./util/log.js";
+
+const log = logger("tracker");
 
 export interface TrackerOptions {
   softLimit: number;
   hardLimit: number;
   currency: string;
+  // Absolute path of the JSON file that holds the persisted per-session
+  // cost map. Loaded on construction, atomically rewritten on every
+  // applyUsageUpdate. Pass undefined to disable persistence (tests).
+  statePath?: string;
 }
 
 export interface TrackerSnapshot {
@@ -19,7 +28,8 @@ export interface TrackerSnapshot {
 // total *for the current agent life* — not strictly monotonic across
 // resurrects, but monotonic within a single agent process. We store the
 // latest amount we've observed per sessionId and sum across sessions to
-// derive the process-wide total.
+// derive the process-wide total. The map is persisted so spend survives
+// daemon restarts (and resets — see adoptFromDisk / src/paths.ts).
 //
 // Cross-life cumulativeCost (when the daemon stamps it on the envelope)
 // is honored if present, otherwise we fall back to costAmount.
@@ -33,16 +43,25 @@ interface PerSessionState {
   currency: string | undefined;
 }
 
+interface PersistedState {
+  // Schema marker — bumped if the on-disk layout ever changes.
+  version: 1;
+  sessions: Record<string, PerSessionState>;
+}
+
 export class CostTracker {
   private sessions = new Map<string, PerSessionState>();
   private currentState: BudgetState = "ok";
+  // Last JSON we wrote to disk. The watcher uses this to ignore its own
+  // writes — if the file's content matches, we did it.
+  private lastWrittenJson = "";
 
-  constructor(private readonly opts: TrackerOptions) {}
+  constructor(private readonly opts: TrackerOptions) {
+    if (opts.statePath) {
+      this.loadFromDisk();
+    }
+  }
 
-  // Apply a usage_update envelope and return the snapshot reflecting the
-  // post-update totals. The update shape (from hydra/Session) is:
-  //   { sessionUpdate: "usage_update", used?, size?, cost?: { amount, currency } }
-  // plus an optional _meta.hydra-acp.cumulativeCost we use when present.
   applyUsageUpdate(
     sessionId: string,
     update: Record<string, unknown>,
@@ -57,15 +76,7 @@ export class CostTracker {
       currency: cost.currency ?? prior.currency,
     };
     this.sessions.set(sessionId, next);
-    return this.snapshotFor(sessionId);
-  }
-
-  // Forget a session — fires on session_closed so the per-session total
-  // doesn't linger. Note: this *reduces* the running total, which is the
-  // right behavior for "budget consumed so far this transformer run"; if
-  // you want a sticky total across closes, drop this call from the bridge.
-  forget(sessionId: string): TrackerSnapshot {
-    this.sessions.delete(sessionId);
+    this.persist();
     return this.snapshotFor(sessionId);
   }
 
@@ -86,8 +97,7 @@ export class CostTracker {
 
   // Returns the new state if this call transitioned to a higher tier
   // (ok→soft, ok→hard, soft→hard). Returns undefined if the state didn't
-  // change or if it dropped (e.g. a session forgot reduces the total).
-  // Used by the bridge to fire a one-shot threshold_cross event.
+  // change or if it dropped (e.g. a reset zeroed everything).
   consumeStateTransition(): BudgetState | undefined {
     const next = deriveState(
       this.totalCost(),
@@ -108,12 +118,156 @@ export class CostTracker {
     return this.currentState;
   }
 
+  // Zero everything in memory and persist (or remove) the state file.
+  // Used by the SIGUSR1-style flow when a user runs `hydra-acp-budgeter
+  // reset` while the transformer process is alive, and by adoptFromDisk
+  // when an external reset deleted the file.
+  reset(): void {
+    this.sessions.clear();
+    this.currentState = "ok";
+    this.persist();
+  }
+
+  // Re-read the state file and replace in-memory state if it changed
+  // from what we last wrote. Called from the fs.watch handler in bridge.
+  // Returns true when state was adopted (caller can react if it cares).
+  adoptFromDisk(): boolean {
+    if (!this.opts.statePath) {
+      return false;
+    }
+    let raw: string;
+    try {
+      raw = readFileSync(this.opts.statePath, "utf8");
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === "ENOENT") {
+        // External deletion = reset.
+        if (this.sessions.size === 0) {
+          return false;
+        }
+        log.info("state file removed externally — resetting in-memory total");
+        this.sessions.clear();
+        this.currentState = "ok";
+        this.lastWrittenJson = "";
+        return true;
+      }
+      log.warn(`read state failed: ${e.message}`);
+      return false;
+    }
+    if (raw === this.lastWrittenJson) {
+      return false;
+    }
+    const adopted = this.applyPersisted(raw);
+    if (adopted) {
+      this.lastWrittenJson = raw;
+      log.info(`adopted state from disk (total=${this.totalCost().toFixed(2)})`);
+    }
+    return adopted;
+  }
+
+  private loadFromDisk(): void {
+    if (!this.opts.statePath) {
+      return;
+    }
+    let raw: string;
+    try {
+      raw = readFileSync(this.opts.statePath, "utf8");
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code !== "ENOENT") {
+        log.warn(`read state failed: ${e.message}; starting fresh`);
+      }
+      return;
+    }
+    if (this.applyPersisted(raw)) {
+      this.lastWrittenJson = raw;
+      log.info(
+        `loaded state from ${this.opts.statePath} (total=${this.totalCost().toFixed(2)})`,
+      );
+    }
+  }
+
+  private applyPersisted(raw: string): boolean {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      log.warn(`state file malformed: ${(err as Error).message}; ignoring`);
+      return false;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      log.warn("state file is not an object; ignoring");
+      return false;
+    }
+    const obj = parsed as Partial<PersistedState>;
+    const sessions = obj.sessions ?? {};
+    if (typeof sessions !== "object" || Array.isArray(sessions)) {
+      log.warn("state.sessions is not an object; ignoring");
+      return false;
+    }
+    this.sessions.clear();
+    for (const [id, val] of Object.entries(sessions)) {
+      if (val && typeof val === "object" && typeof (val as PerSessionState).cost === "number") {
+        const v = val as PerSessionState;
+        this.sessions.set(id, {
+          cost: v.cost,
+          currency: typeof v.currency === "string" ? v.currency : undefined,
+        });
+      }
+    }
+    this.currentState = deriveState(
+      this.totalCost(),
+      this.opts.softLimit,
+      this.opts.hardLimit,
+    );
+    return true;
+  }
+
+  private persist(): void {
+    if (!this.opts.statePath) {
+      return;
+    }
+    const payload: PersistedState = {
+      version: 1,
+      sessions: Object.fromEntries(this.sessions),
+    };
+    const json = JSON.stringify(payload, null, 2);
+    if (json === this.lastWrittenJson) {
+      return;
+    }
+    try {
+      mkdirSync(dirname(this.opts.statePath), { recursive: true });
+      const tmp = `${this.opts.statePath}.tmp`;
+      writeFileSync(tmp, json, { encoding: "utf8", mode: 0o600 });
+      renameSync(tmp, this.opts.statePath);
+      this.lastWrittenJson = json;
+    } catch (err) {
+      log.warn(`persist failed: ${(err as Error).message}`);
+    }
+  }
+
   private totalCost(): number {
     let sum = 0;
     for (const s of this.sessions.values()) {
       sum += s.cost;
     }
     return sum;
+  }
+}
+
+// Delete the persisted state file. Used by the `reset` subcommand when
+// no live process is running (or as the message the live process picks
+// up via fs.watch).
+export function deleteStateFile(statePath: string): boolean {
+  try {
+    unlinkSync(statePath);
+    return true;
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (e.code === "ENOENT") {
+      return false;
+    }
+    throw err;
   }
 }
 

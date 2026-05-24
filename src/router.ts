@@ -111,7 +111,11 @@ export class EventRouter {
       return;
     }
     if (event === "session.closed") {
-      this.tracker.forget(sessionId);
+      // Note: we deliberately do NOT drop the session's cost from the
+      // tracker — total spend is sticky across session.closed so the
+      // budget reflects every dollar this transformer has seen. Reset
+      // via `hydra-acp-budgeter reset` (deletes the state file) when
+      // you want to zero it.
       await this.fire({
         sessionId,
         kind: "session_closed",

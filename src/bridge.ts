@@ -1,3 +1,5 @@
+import { watch, type FSWatcher } from "node:fs";
+import { basename, dirname } from "node:path";
 import { TransformerClient } from "./acp/transformer.js";
 import type {
   JsonRpcNotification,
@@ -20,6 +22,11 @@ export interface BridgeOptions {
   hardLimit: number;
   currency: string;
   rule: RuleFunction;
+  // Absolute path to the persisted state file. Loaded on startup,
+  // rewritten on every usage_update. The bridge also fs.watches it so
+  // external resets (eg. `hydra-acp-budgeter reset` deleting the file)
+  // are picked up without restarting.
+  statePath?: string;
 }
 
 // The set of intercepts the budgeter declares to the daemon. Kept in one
@@ -44,6 +51,8 @@ export class BudgeterBridge {
   private readonly tracker: CostTracker;
   private readonly enforcer: Enforcer;
   private readonly router: EventRouter;
+  private watcher: FSWatcher | undefined;
+  private watchTimer: NodeJS.Timeout | undefined;
   private stopped = false;
 
   constructor(private readonly opts: BridgeOptions) {
@@ -56,6 +65,7 @@ export class BudgeterBridge {
       softLimit: opts.softLimit,
       hardLimit: opts.hardLimit,
       currency: opts.currency,
+      statePath: opts.statePath,
     });
     this.enforcer = new Enforcer(this.client, log);
     this.router = new EventRouter(
@@ -73,6 +83,7 @@ export class BudgeterBridge {
       log.warn(`client error: ${err.message}`);
     });
     this.client.start();
+    this.startWatcher();
   }
 
   stop(): void {
@@ -80,7 +91,54 @@ export class BudgeterBridge {
       return;
     }
     this.stopped = true;
+    if (this.watcher) {
+      this.watcher.close();
+      this.watcher = undefined;
+    }
+    if (this.watchTimer) {
+      clearTimeout(this.watchTimer);
+      this.watchTimer = undefined;
+    }
     this.client.stop();
+  }
+
+  // Watch the state file's parent directory so we still see events when
+  // the file is created later (e.g. first usage_update of a fresh run)
+  // or deleted entirely (the reset subcommand). fs.watch on a missing
+  // file throws on some platforms, but the parent dir is created by
+  // CostTracker.persist before any write happens, and the daemon writes
+  // the .pid file there even sooner — so the dir reliably exists by
+  // the time start() runs. We still try/catch in case it doesn't.
+  private startWatcher(): void {
+    if (!this.opts.statePath) {
+      return;
+    }
+    const dir = dirname(this.opts.statePath);
+    const file = basename(this.opts.statePath);
+    try {
+      this.watcher = watch(dir, (eventType, filename) => {
+        if (filename && filename !== file) {
+          return;
+        }
+        // fs.watch can fire 1–N times per logical change (especially
+        // when our own atomic-rename hits it). Debounce briefly so we
+        // do at most one re-read per burst.
+        if (this.watchTimer) {
+          return;
+        }
+        this.watchTimer = setTimeout(() => {
+          this.watchTimer = undefined;
+          try {
+            this.tracker.adoptFromDisk();
+          } catch (err) {
+            log.warn(`adoptFromDisk failed: ${(err as Error).message}`);
+          }
+        }, 50);
+      });
+      log.debug(`watching ${this.opts.statePath}`);
+    } catch (err) {
+      log.warn(`fs.watch failed for ${dir}: ${(err as Error).message}`);
+    }
   }
 
   private onRequest(r: JsonRpcRequest): void {

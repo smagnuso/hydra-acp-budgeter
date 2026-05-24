@@ -4,7 +4,9 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.js";
 import { BudgeterBridge } from "./bridge.js";
+import { stateFilePath } from "./paths.js";
 import { DEFAULT_RULE } from "./rule.js";
+import { deleteStateFile } from "./tracker.js";
 import { logger, setDebug } from "./util/log.js";
 
 const log = logger("main");
@@ -21,16 +23,24 @@ function readVersion(): string {
   }
 }
 
-async function main(): Promise<void> {
-  const argv = process.argv.slice(2);
-  if (argv.includes("--version") || argv.includes("-v")) {
-    process.stdout.write(`hydra-acp-budgeter ${readVersion()}\n`);
-    return;
+function runReset(): void {
+  const path = stateFilePath();
+  const removed = deleteStateFile(path);
+  if (removed) {
+    process.stdout.write(`Removed ${path}\n`);
+    process.stdout.write(
+      "If hydra-acp-budgeter is running, it will pick this up via fs.watch.\n",
+    );
+  } else {
+    process.stdout.write(`No state file at ${path}; nothing to reset.\n`);
   }
+}
 
+async function runTransformer(): Promise<void> {
   const config = loadConfig();
   setDebug(config.debug);
 
+  const statePath = stateFilePath();
   const bridge = new BudgeterBridge({
     daemonWsUrl: config.hydraWsUrl,
     token: config.hydraToken,
@@ -38,6 +48,7 @@ async function main(): Promise<void> {
     hardLimit: config.hardLimit,
     currency: config.currency,
     rule: DEFAULT_RULE,
+    statePath,
   });
   bridge.start();
 
@@ -50,8 +61,21 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
   log.info(
-    `hydra-acp-budgeter up; daemon=${config.hydraDaemonUrl} soft=${config.softLimit} hard=${config.hardLimit} ${config.currency}`,
+    `hydra-acp-budgeter up; daemon=${config.hydraDaemonUrl} soft=${config.softLimit} hard=${config.hardLimit} ${config.currency} state=${statePath}`,
   );
+}
+
+async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+  if (argv.includes("--version") || argv.includes("-v")) {
+    process.stdout.write(`hydra-acp-budgeter ${readVersion()}\n`);
+    return;
+  }
+  if (argv[0] === "reset") {
+    runReset();
+    return;
+  }
+  await runTransformer();
 }
 
 main().catch((err) => {

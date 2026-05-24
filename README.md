@@ -93,11 +93,19 @@ Tracks each session's running cost from `usage_update` events (the `cost.amount`
 **4. New session opens while over hard limit**
 - The budgeter fires the same warning style on `session.opened` so the user knows their next prompt will bounce, even before they send it.
 
-Reset is currently "restart the transformer" — the per-session cost map is in-memory only. Stop/start with:
+### State and reset
+
+The per-session cost map is persisted to `~/.hydra-acp/transformers/hydra-acp-budgeter.state.json`, atomically rewritten on every `usage_update`. The running budgeter reads it on startup and `fs.watch`es it for external mutations — so daemon restarts preserve the running total, and a reset from elsewhere is picked up live without restarting.
+
+Spend is sticky across `session.closed`: a closed session's cost stays in the total until you reset.
+
+To zero the budget:
 
 ```sh
-hydra-acp transformers restart hydra-acp-budgeter
+hydra-acp-budgeter reset
 ```
+
+That deletes the state file. If the transformer is running, its watcher adopts the deletion and the in-memory total drops to zero on the next tick (≤50ms). If it isn't running, the file is just gone and the next start begins at zero.
 
 ## Environment
 

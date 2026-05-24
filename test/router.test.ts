@@ -97,13 +97,14 @@ test("session.opened over hard warns the new session", async () => {
   assert.equal(p.sessionId, "s2");
 });
 
-test("session.closed forgets per-session cost", async () => {
+test("session.closed keeps per-session cost (spend is sticky)", async () => {
   const { router, tracker } = makeRouter();
   await router.onResponseUpdate("s1", usage(8));
   await router.onResponseUpdate("s2", usage(4));
   assert.equal(tracker.snapshotFor("s1").total, 12);
   await router.onLifecycle("session.closed", "s1");
-  assert.equal(tracker.snapshotFor("s2").total, 4);
+  // Total still includes s1's spend after it closed.
+  assert.equal(tracker.snapshotFor("s2").total, 12);
 });
 
 test("custom rule throwing is swallowed and skips dispatch", async () => {
