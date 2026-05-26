@@ -82,8 +82,31 @@ export class BudgeterBridge {
     this.client.on("error", (err) => {
       log.warn(`client error: ${err.message}`);
     });
+    this.client.on("open", () => {
+      void this.registerSlashCommands();
+    });
     this.client.start();
     this.startWatcher();
+  }
+
+  private async registerSlashCommands(): Promise<void> {
+    try {
+      await this.client.request("hydra-acp/register_commands", {
+        commands: [
+          {
+            verb: "reset",
+            description: "Reset accumulated cost baseline to current totals",
+          },
+          {
+            verb: "status",
+            description: "Show current spend vs. soft/hard limits",
+          },
+        ],
+      });
+      log.info("registered /hydra hydra-acp-budgeter {reset,status}");
+    } catch (err) {
+      log.warn(`register_commands failed: ${(err as Error).message}`);
+    }
   }
 
   stop(): void {
@@ -142,6 +165,10 @@ export class BudgeterBridge {
   }
 
   private onRequest(r: JsonRpcRequest): void {
+    if (r.method === "hydra-acp/extension_command") {
+      this.handleExtensionCommand(r);
+      return;
+    }
     if (r.method !== "transformer/message") {
       // The daemon only sends transformer/message requests to us. Anything
       // else is an error on the daemon side or a future protocol kind we
@@ -205,6 +232,31 @@ export class BudgeterBridge {
     this.client.reply(r.id, { action: "continue" });
   }
 
+  // "/hydra hydra-acp-budgeter <verb> [args]" routes to here. The daemon
+  // validates the verb against what we registered before forwarding, so
+  // an unknown verb here means the registry and our switch fell out of
+  // sync. Replies are returned as { text } and surface in the session
+  // transcript as a synthetic agent message.
+  private handleExtensionCommand(r: JsonRpcRequest): void {
+    const params = (r.params ?? {}) as {
+      sessionId?: unknown;
+      verb?: unknown;
+      args?: unknown;
+    };
+    const verb = typeof params.verb === "string" ? params.verb : "";
+    const sessionId =
+      typeof params.sessionId === "string" ? params.sessionId : "";
+    const outcome = runBudgeterCommand(this.tracker, this.opts.currency, {
+      verb,
+      sessionId,
+    });
+    if (outcome.kind === "ok") {
+      this.client.reply(r.id, { text: outcome.text });
+    } else {
+      this.client.replyError(r.id, -32601, outcome.message);
+    }
+  }
+
   private onNotification(n: JsonRpcNotification): void {
     if (n.method !== "transformer/session_event") {
       return;
@@ -228,4 +280,40 @@ export class BudgeterBridge {
       return;
     }
   }
+}
+
+// Pure verb dispatch — extracted from BudgeterBridge.handleExtensionCommand
+// so unit tests can exercise it without a TransformerClient. Mutates the
+// tracker for `reset`; reads the tracker for `status`. Returns the text
+// the bridge should hand back to the daemon, or a JSON-RPC error message
+// for unknown verbs.
+export type BudgeterCommandOutcome =
+  | { kind: "ok"; text: string }
+  | { kind: "error"; message: string };
+
+export function runBudgeterCommand(
+  tracker: CostTracker,
+  configuredCurrency: string,
+  input: { verb: string; sessionId: string },
+): BudgeterCommandOutcome {
+  if (input.verb === "reset") {
+    tracker.reset();
+    const snap = input.sessionId
+      ? tracker.snapshotFor(input.sessionId)
+      : { total: 0, currency: configuredCurrency };
+    return {
+      kind: "ok",
+      text: `hydra-acp-budgeter: spend reset (total now ${snap.total.toFixed(2)} ${snap.currency})`,
+    };
+  }
+  if (input.verb === "status") {
+    const snap = tracker.snapshotFor(input.sessionId);
+    return {
+      kind: "ok",
+      text:
+        `hydra-acp-budgeter: total ${snap.total.toFixed(2)} ${snap.currency} ` +
+        `(this session ${snap.perSession.toFixed(2)}, soft ${snap.soft}, hard ${snap.hard}, state ${snap.state})`,
+    };
+  }
+  return { kind: "error", message: `unknown verb: ${input.verb}` };
 }
