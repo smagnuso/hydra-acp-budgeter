@@ -41,7 +41,7 @@ export function isResponse(m: JsonRpcMessage): m is JsonRpcResponse {
   return !("method" in m) && "id" in m;
 }
 
-// Shape of params the daemon delivers via transformer/message. Mirrors the
+// Shape of params the daemon delivers via hydra-acp/transformer/message. Mirrors the
 // envelope hydra-acp builds in Session.forwardRequest / runResponseChain.
 export interface TransformerMessageParams {
   token: string;
@@ -52,12 +52,12 @@ export interface TransformerMessageParams {
   envelope: unknown;
 }
 
-// Action returned to the daemon from transformer/message.
+// Action returned to the daemon from hydra-acp/transformer/message.
 //   continue   — daemon proceeds with the envelope unchanged.
 //   stop       — daemon halts the chain. For request side, the optional
 //                payload becomes the response delivered to the originator.
 //   processing — transformer parks the claim and will discharge later via
-//                hydra-acp/emit_message with respondsTo, or re-emit via
+//                hydra-acp/message/emit with respondsTo, or re-emit via
 //                route:"chain".
 export interface TransformerAction {
   action: "continue" | "stop" | "processing";

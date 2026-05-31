@@ -51,7 +51,7 @@ export class Enforcer {
       });
     }
     try {
-      await this.client.request("hydra-acp/emit_message", {
+      await this.client.request("hydra-acp/message/emit", {
         sessionId,
         method: "session/update",
         envelope,

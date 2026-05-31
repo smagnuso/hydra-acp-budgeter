@@ -48,7 +48,7 @@ test("cost-bearing tick over soft fires a warn via emit_message", async () => {
   await router.onResponseUpdate("s1", usage(5));
   assert.equal(capture.requests.length, 1);
   const req = capture.requests[0]!;
-  assert.equal(req.method, "hydra-acp/emit_message");
+  assert.equal(req.method, "hydra-acp/message/emit");
   const p = req.params as { sessionId: string; method: string; envelope: { update: { sessionUpdate: string } } };
   assert.equal(p.sessionId, "s1");
   assert.equal(p.method, "session/update");

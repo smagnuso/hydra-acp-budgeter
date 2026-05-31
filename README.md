@@ -138,7 +138,7 @@ The file is optional — all keys have defaults and the transformer works withou
   - `lifecycle:session.opened`  — warn brand-new sessions that are already over budget
   - `lifecycle:session.closed`  — fires session_closed rule event (cost stays sticky)
 - For every `transformer/message` the daemon dispatches, the budgeter responds with `{ action: "continue" }` (observe-only on response side, allow on request side when under budget) or `{ action: "stop", payload: { stopReason: "refusal", _meta: ... } }` (when over hard limit).
-- Warnings are emitted via `hydra-acp/emit_message` with `route: "chain"` and `method: "session/update"` so they flow back through the daemon's broadcast machinery and reach every attached client.
+- Warnings are emitted via `hydra-acp/message/emit` with `route: "chain"` and `method: "session/update"` so they flow back through the daemon's broadcast machinery and reach every attached client.
 - All cost state is in-memory; restart the transformer to reset.
 
 For a working example of the transformer protocol the budgeter speaks, see [`hydra-acp/cli/examples/transformer-observe.mjs`](https://github.com/smagnuso/hydra-acp/blob/main/cli/examples/transformer-observe.mjs).

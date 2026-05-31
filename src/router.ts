@@ -9,7 +9,7 @@ export interface SessionMeta {
   title?: string;
 }
 
-// Translates incoming transformer/message and transformer/session_event
+// Translates incoming hydra-acp/transformer/message and hydra-acp/transformer/session_event
 // envelopes into BudgetEvents, runs them through the rule, and dispatches
 // the resulting verdicts via the Enforcer. Unlike the notifier's
 // EventRouter (one instance per session), this is a singleton — the

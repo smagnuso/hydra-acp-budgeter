@@ -24,7 +24,7 @@ export interface TransformerClientOptions {
   daemonWsUrl: string;
   token: string;
   // Set of `<phase>:<method>` intercepts and `lifecycle:<event>` events
-  // the transformer wants. Sent in transformer/initialize.
+  // the transformer wants. Sent in hydra-acp/transformer/initialize.
   intercepts: string[];
 }
 
@@ -44,7 +44,7 @@ interface PendingRequest {
 
 // One WebSocket to the daemon for the entire transformer process. Unlike
 // the notifier's AcpAttach (one WS per session), the daemon multiplexes
-// every session's transformer/message + transformer/session_event over
+// every session's hydra-acp/transformer/message + hydra-acp/transformer/session_event over
 // this single connection, keyed by sessionId in the params.
 export class TransformerClient extends EventEmitter<TransformerClientEvents> {
   private ws: WebSocket | undefined;
@@ -194,14 +194,14 @@ export class TransformerClient extends EventEmitter<TransformerClientEvents> {
       log.warn(`initialize failed: ${(err as Error).message}`);
     }
     try {
-      await this.request("transformer/initialize", {
+      await this.request("hydra-acp/transformer/initialize", {
         intercepts: this.opts.intercepts,
       });
       log.info(
-        `transformer/initialize ok intercepts=${this.opts.intercepts.join(",")}`,
+        `hydra-acp/transformer/initialize ok intercepts=${this.opts.intercepts.join(",")}`,
       );
     } catch (err) {
-      log.warn(`transformer/initialize failed: ${(err as Error).message}`);
+      log.warn(`hydra-acp/transformer/initialize failed: ${(err as Error).message}`);
       throw err;
     }
   }

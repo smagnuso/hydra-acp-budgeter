@@ -91,7 +91,7 @@ export class BudgeterBridge {
 
   private async registerSlashCommands(): Promise<void> {
     try {
-      await this.client.request("hydra-acp/register_commands", {
+      await this.client.request("hydra-acp/commands/register", {
         commands: [
           {
             verb: "reset",
@@ -165,12 +165,12 @@ export class BudgeterBridge {
   }
 
   private onRequest(r: JsonRpcRequest): void {
-    if (r.method === "hydra-acp/extension_command") {
+    if (r.method === "hydra-acp/commands/invoke") {
       this.handleExtensionCommand(r);
       return;
     }
-    if (r.method !== "transformer/message") {
-      // The daemon only sends transformer/message requests to us. Anything
+    if (r.method !== "hydra-acp/transformer/message") {
+      // The daemon only sends hydra-acp/transformer/message requests to us. Anything
       // else is an error on the daemon side or a future protocol kind we
       // don't yet understand. Continue rather than guessing.
       this.client.reply(r.id, { action: "continue" });
@@ -258,7 +258,7 @@ export class BudgeterBridge {
   }
 
   private onNotification(n: JsonRpcNotification): void {
-    if (n.method !== "transformer/session_event") {
+    if (n.method !== "hydra-acp/transformer/session_event") {
       return;
     }
     const params = (n.params ?? {}) as Partial<TransformerSessionEvent>;
