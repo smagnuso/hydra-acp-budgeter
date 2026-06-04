@@ -9,10 +9,10 @@ Runs as a daemon-managed *transformer* (not a client extension): it connects onc
 From npm (recommended once published):
 
 ```sh
-npm install -g @hydra-acp/budgeter
+npm install -g @hydra-acp/cli @hydra-acp/budgeter
 ```
 
-This drops a `hydra-acp-budgeter` binary on your PATH.
+This drops the `hydra-acp` (and `hydra`) CLI plus a `hydra-acp-budgeter` binary on your PATH. The CLI dispatches `hydra-acp <name>` to any `hydra-acp-<name>` binary on PATH, so the budgeter is also reachable as `hydra-acp budgeter`.
 
 Or from source:
 
@@ -101,7 +101,7 @@ Spend is sticky across `session.closed`: a closed session's cost stays in the to
 To zero the budget:
 
 ```sh
-hydra-acp-budgeter reset
+hydra-acp budgeter reset
 ```
 
 That deletes the state file. If the transformer is running, its watcher adopts the deletion and the in-memory total drops to zero on the next tick (≤50ms). If it isn't running, the file is just gone and the next start begins at zero.
