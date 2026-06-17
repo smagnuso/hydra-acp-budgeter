@@ -9,6 +9,7 @@ import { DEFAULT_RULE } from "./rule.js";
 import { deleteStateFile } from "./tracker.js";
 import { logger, setDebug } from "./util/log.js";
 import { scanSessions } from "./cost/session-store.js";
+import { listSessionsFromDaemon } from "./cost/daemon-client.js";
 import { streamHistoryEvents } from "./cost/history-stream.js";
 import type { CostEvent } from "./cost/history-stream.js";
 import { aggregate, applyFilters, parseSince } from "./cost/aggregate.js";
@@ -155,7 +156,8 @@ async function runCost(argv: string[]): Promise<void> {
     const useTokens = metric === "tokens";
     const minVal = minStr !== undefined ? parseFloat(minStr) : undefined;
 
-    const allRecords = scanSessions();
+    const allRecords =
+    (await listSessionsFromDaemon()) ?? scanSessions();
     const records = applyFilters(allRecords, {
         since: effectiveSince,
         dir,
