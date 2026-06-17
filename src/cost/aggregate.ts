@@ -9,7 +9,7 @@ import type { CostEvent } from "./history-stream.js";
 // ---------------------------------------------------------------------------
 
 /** Date bucket granularity. */
-export type BucketSpec = "day" | "week" | "month";
+export type BucketSpec = "hour" | "day" | "week" | "month";
 
 /** Relative-duration spec accepted by parseSince(). */
 export type SinceSpec = string;
@@ -326,7 +326,10 @@ export function aggregate(
   if (effectiveSince === undefined && opts.bucket !== undefined) {
     const now = new Date();
 
-    if (opts.bucket === "day") {
+    if (opts.bucket === "hour") {
+      now.setHours(now.getHours() - 24);
+      effectiveSince = now;
+    } else if (opts.bucket === "day") {
       now.setDate(now.getDate() - 30);
       effectiveSince = now;
     } else if (opts.bucket === "week") {
@@ -452,6 +455,15 @@ export function aggregate(
 
     if (Number.isNaN(date.getTime())) {
       return "<invalid>";
+    }
+
+    if (opts.bucket === "hour") {
+      const datePart = date.toLocaleDateString(undefined, {
+        month: "2-digit",
+        day: "2-digit",
+      });
+      const hh = String(date.getHours()).padStart(2, "0");
+      return `${datePart} ${hh}:00`;
     }
 
     if (opts.bucket === "day") {

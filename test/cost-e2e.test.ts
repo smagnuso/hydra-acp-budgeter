@@ -83,7 +83,7 @@ test("cost subcommand: text output shows total cost from meta.json", async () =>
     updatedAt: "2026-06-15T00:00:00.000Z",
   });
 
-  const { stdout } = await runCost([]);
+  const { stdout } = await runCost(["--metric", "cost"]);
   assert.ok(stdout.includes("Total:"), "Output should include 'Total:'");
   assert.ok(stdout.includes("$"), "Output should include '$'");
   // Fast path sums costAmount from meta.json: 3.50 + 1.25 = 4.75
