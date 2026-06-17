@@ -138,26 +138,42 @@ export function renderText(agg: CostAggregate, opts: RenderOptions = {}): string
   // Build headline
   let out = "";
 
+  const sessionsScope = (n: number): string => {
+    return `${n} session${n === 1 ? "" : "s"}`;
+  };
+
   if (agg.kind === "total") {
     const totalStr = formatCost(agg.row.costAmount);
     const n = agg.row.sessionCount;
-    const scope = n !== undefined ? `${n} session${n === 1 ? "" : "s"}` : (agg.row.label ?? "all sessions");
+    const scope = n !== undefined ? sessionsScope(n) : (agg.row.label ?? "all sessions");
     out += `Total: ${totalStr} across ${scope}\n`;
   } else if (agg.kind === "grouped") {
     const totalCost = sumGroupCosts(agg.groups);
     const totalStr = formatCost(totalCost);
-    out += `Total: ${totalStr} across ${agg.groups.length} group(s)\n`;
+    let n = 0;
+    for (const g of agg.groups) {
+      for (const it of g.items) {
+        n += it.sessionCount ?? 0;
+      }
+    }
+    out += `Total: ${totalStr} across ${sessionsScope(n)}\n`;
   } else if (agg.kind === "timeSeries") {
     const totalCost = agg.timeSeries.reduce((s, b) => s + b.costAmount, 0);
     const totalStr = formatCost(totalCost);
-    out += `Total: ${totalStr} across ${agg.timeSeries.length} period(s)\n`;
+    const n = agg.timeSeries.reduce((s, b) => s + (b.sessionCount ?? 0), 0);
+    out += `Total: ${totalStr} across ${sessionsScope(n)}\n`;
   } else if (agg.kind === "timeSeriesGrouped") {
     const totalCost = sumGroupCosts(agg.groups);
     const totalStr = formatCost(totalCost);
-    out += `Total: ${totalStr} across ${agg.groups.length} group(s)\n`;
+    let n = 0;
+    for (const g of agg.groups) {
+      for (const it of g.items) {
+        n += it.sessionCount ?? 0;
+      }
+    }
+    out += `Total: ${totalStr} across ${sessionsScope(n)}\n`;
   }
 
-  out += "─".repeat(terminalWidth) + "\n";
 
   // Render content based on aggregate kind
   if (agg.kind === "grouped") {

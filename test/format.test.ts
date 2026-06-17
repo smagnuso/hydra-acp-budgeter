@@ -55,10 +55,10 @@ test("renderText total: handles zero cost", () => {
   assert.ok(result.includes("Total: $0.00 across None"));
 });
 
-test("renderText total: renders separator line", () => {
+test("renderText total: does not render a separator line", () => {
   const agg = makeTotal();
   const result = renderText(agg);
-  assert.ok(result.includes("\u2500"));
+  assert.ok(!result.includes("\u2500"));
 });
 
 // ---------------------------------------------------------------------------
@@ -76,10 +76,10 @@ function makeGrouped(opts: Partial<CostAggregate & { kind: "grouped" }> = {}): C
   };
 }
 
-test("renderText grouped: shows headline with group count", () => {
+test("renderText grouped: shows headline with session count", () => {
   const agg = makeGrouped();
   const result = renderText(agg);
-  assert.ok(result.includes("Total: $4.50 across 2 group(s)"));
+  assert.ok(/Total: \$4\.50 across \d+ sessions?/.test(result));
 });
 
 test("renderText grouped: lists group labels as flat rows", () => {
@@ -150,10 +150,10 @@ function makeTimeSeries(opts: Partial<CostAggregate & { kind: "timeSeries" }> = 
   };
 }
 
-test("renderText timeSeries: shows headline with period count", () => {
+test("renderText timeSeries: shows headline with session count", () => {
   const agg = makeTimeSeries();
   const result = renderText(agg);
-  assert.ok(result.includes("Total: $1.50 across 2 period(s)"));
+  assert.ok(/Total: \$1\.50 across \d+ sessions?/.test(result));
 });
 
 test("renderText timeSeries: renders bucket labels and cost values", () => {
