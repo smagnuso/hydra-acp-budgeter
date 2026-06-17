@@ -142,3 +142,114 @@ The file is optional — all keys have defaults and the transformer works withou
 - All cost state is in-memory; restart the transformer to reset.
 
 For a working example of the transformer protocol the budgeter speaks, see [`hydra-acp/cli/examples/transformer-observe.mjs`](https://github.com/smagnuso/hydra-acp/blob/main/cli/examples/transformer-observe.mjs).
+
+## Reporting historical cost
+
+The `cost` subcommand reads session metadata from `~/.hydra-acp/sessions/<id>/meta.json` and optionally streams `history.jsonl` for time-bucketed or token-level queries. It is a pure reader — no new files are written.
+
+### Quick start
+
+```sh
+# All-time total cost across all sessions
+hydra budgeter cost
+
+# JSON output (machine-readable)
+hydra budgeter cost --json
+```
+
+### Time-based queries
+
+```sh
+# Last 7 days
+hydra budgeter cost --since 7d
+
+# Last 30 days, grouped by day buckets
+hydra budgeter cost --since 30d --bucket day
+
+# Last 6 months, grouped by week
+hydra budgeter cost --since 180d --bucket week
+
+# Calendar-month buckets over the last 2 years
+hydra budgeter cost --bucket month
+```
+
+### Grouping
+
+```sh
+# By directory (depth-1 below $HOME)
+hydra budgeter cost --by dir
+
+# By session ID
+hydra budgeter cost --by session
+
+# By model
+hydra budgeter cost --by model
+
+# By agent
+hydra budgeter cost --by agent
+
+# Directory with custom depth
+hydra budgeter cost --by dir --depth 2
+```
+
+### Filtering
+
+```sh
+# Only interactive sessions
+hydra budgeter cost --interactive
+
+# Only non-interactive (background) sessions
+hydra budgeter cost --no-interactive
+
+# Only sessions under a specific directory prefix
+hydra budgeter cost --dir ~/dev/hydra-acp
+
+# Combine filters
+hydra budgeter cost --since 7d --dir ~/dev/hydra-acp --by session
+```
+
+### Token-level queries
+
+```sh
+# Total tokens across all sessions
+hydra budgeter cost --metric tokens
+
+# Tokens with histogram
+hydra budgeter cost --metric tokens --histogram
+```
+
+### Output formats
+
+**Text (default):**
+
+```
+Total: $12.34 across 5 session(s)
+──────────────────────────────────────────────────────────────────────────────
+  Label                   Cost          Tokens
+  myapp                  $7.50         142k
+  other                  $4.84           89k
+```
+
+**JSON (`--json`):**
+
+```json
+{
+  "kind": "grouped",
+  "currency": "USD",
+  "groups": [
+    {
+      "label": "myapp",
+      "items": [{ "label": "myapp", "costAmount": 7.50, "deltaCost": 2.30 }]
+    },
+    {
+      "label": "other",
+      "items": [{ "label": "other", "costAmount": 4.84, "deltaCost": 1.10 }]
+    }
+  ]
+}
+```
+
+### Fast path vs slow path
+
+- **Fast path** — `--by dir/session/model/agent` without `--since`, `--dir`, or `--interactive`: reads only `meta.json` across all sessions, returns instantly even with ~1000 sessions.
+- **Slow path** — any query with `--since`, `--bucket`, `--metric tokens`, `--dir`, or `--interactive`: also streams `history.jsonl` for delta-cost and token computation, pre-filtering sessions by `updatedAt`.
