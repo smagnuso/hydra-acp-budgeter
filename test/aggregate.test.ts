@@ -168,7 +168,7 @@ test("aggregate grouped by agent", () => {
 });
 
 test("aggregate grouped with --tokens: includes token totals from events", () => {
-  const result = aggregate([makeSession({ sessionId: "a", costAmount: 1.0 }), makeSession({ sessionId: "b", costAmount: 2.0 })], [makeEvent({ sessionId: "a", deltaCost: 0.1, ts: "2026-06-15T12:00:00.000Z", inputTokens: 100 }), makeEvent({ sessionId: "b", deltaCost: 0.2, ts: "2026-06-14T13:00:00.000Z", inputTokens: 200 })], { by: "session", tokens: true });
+  const result = aggregate([makeSession({ sessionId: "a", costAmount: 1.0, contextTokens: 0 }), makeSession({ sessionId: "b", costAmount: 2.0, contextTokens: 0 })], [makeEvent({ sessionId: "a", deltaCost: 0.1, ts: "2026-06-15T12:00:00.000Z", inputTokens: 100 }), makeEvent({ sessionId: "b", deltaCost: 0.2, ts: "2026-06-14T13:00:00.000Z", inputTokens: 200 })], { by: "session", tokens: true, min: -1 });
   assert.equal(result.kind, "grouped");
   const grouped = result as Extract<typeof result, { kind: "grouped" }>;
   const a = grouped.groups.find(g => g.label === "a");

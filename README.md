@@ -151,71 +151,71 @@ The `cost` subcommand reads session metadata from `~/.hydra-acp/sessions/<id>/me
 
 ```sh
 # All-time total cost across all sessions
-hydra budgeter cost
+hydra budgeter usage
 
 # JSON output (machine-readable)
-hydra budgeter cost --json
+hydra budgeter usage --json
 ```
 
 ### Time-based queries
 
 ```sh
 # Last 7 days
-hydra budgeter cost --since 7d
+hydra budgeter usage --since 7d
 
 # Last 30 days, grouped by day buckets
-hydra budgeter cost --since 30d --bucket day
+hydra budgeter usage --since 30d --bucket day
 
 # Last 6 months, grouped by week
-hydra budgeter cost --since 180d --bucket week
+hydra budgeter usage --since 180d --bucket week
 
 # Calendar-month buckets over the last 2 years
-hydra budgeter cost --bucket month
+hydra budgeter usage --bucket month
 ```
 
 ### Grouping
 
 ```sh
 # By directory (depth-1 below $HOME)
-hydra budgeter cost --by dir
+hydra budgeter usage --by dir
 
 # By session ID
-hydra budgeter cost --by session
+hydra budgeter usage --by session
 
 # By model
-hydra budgeter cost --by model
+hydra budgeter usage --by model
 
 # By agent
-hydra budgeter cost --by agent
+hydra budgeter usage --by agent
 
 # Directory with custom depth
-hydra budgeter cost --by dir --depth 2
+hydra budgeter usage --by dir --depth 2
 ```
 
 ### Filtering
 
 ```sh
 # Only interactive sessions
-hydra budgeter cost --interactive
+hydra budgeter usage --interactive
 
 # Only non-interactive (background) sessions
-hydra budgeter cost --no-interactive
+hydra budgeter usage --no-interactive
 
 # Only sessions under a specific directory prefix
-hydra budgeter cost --dir ~/dev/hydra-acp
+hydra budgeter usage --dir ~/dev/hydra-acp
 
 # Combine filters
-hydra budgeter cost --since 7d --dir ~/dev/hydra-acp --by session
+hydra budgeter usage --since 7d --dir ~/dev/hydra-acp --by session
 ```
 
 ### Token-level queries
 
 ```sh
 # Total tokens across all sessions
-hydra budgeter cost --metric tokens
+hydra budgeter usage --metric tokens
 
 # Tokens with histogram
-hydra budgeter cost --metric tokens --histogram
+hydra budgeter usage --metric tokens --histogram
 ```
 
 ### Output formats

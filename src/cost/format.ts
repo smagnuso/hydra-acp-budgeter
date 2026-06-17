@@ -21,6 +21,42 @@ function getItemLabel(item: AggregateRow | TimeBucket): string {
   return "label" in item ? item.label : item.bucket;
 }
 
+// Format a list of session counts so numbers right-align in one column
+// and the word "session"/"sessions" left-aligns in the next, padded to a
+// consistent overall width. Indices missing a count produce "".
+function formatSessionCounts(
+  counts: (number | undefined)[],
+): { strs: string[]; width: number } {
+  let maxNumLen = 0;
+  let anyPlural = false;
+
+  for (const n of counts) {
+    if (n === undefined) {
+      continue;
+    }
+    const nStr = String(n);
+    if (nStr.length > maxNumLen) {
+      maxNumLen = nStr.length;
+    }
+    if (n !== 1) {
+      anyPlural = true;
+    }
+  }
+
+  const wordWidth = anyPlural ? "sessions".length : "session".length;
+  const strs = counts.map((n) => {
+    if (n === undefined) {
+      return "";
+    }
+    const num = String(n).padStart(maxNumLen);
+    const word = (n === 1 ? "session" : "sessions").padEnd(wordWidth);
+    return `${num} ${word}`;
+  });
+
+  const width = maxNumLen + 1 + wordWidth;
+  return { strs, width };
+}
+
 function humanizeTokens(n: number): string {
   if (n < 1000) {
     return String(n);
@@ -125,15 +161,43 @@ export function renderText(agg: CostAggregate, opts: RenderOptions = {}): string
 
   // Render content based on aggregate kind
   if (agg.kind === "grouped") {
-    for (const group of agg.groups) {
-      out += `\n${group.label}:\n`;
-      const rows = group.items;
-      const hasTokenData = rows.some((r) => r.inputTokens !== undefined || r.outputTokens !== undefined);
+    // Most --by queries produce one row per group; flatten so we get one
+    // line per group instead of a per-group sub-table.
+    const allSingleton = agg.groups.every((g) => g.items.length === 1);
+
+    if (allSingleton) {
+      const flattened: AggregateRow[] = [];
+
+      for (const group of agg.groups) {
+        const item = group.items[0];
+        if (item === undefined) {
+          continue;
+        }
+        flattened.push({ ...item, label: group.label });
+      }
+
+      flattened.sort((a, b) => {
+        const av = useTokens ? tokenSum(a) : a.costAmount;
+        const bv = useTokens ? tokenSum(b) : b.costAmount;
+        return bv - av;
+      });
 
       if (showHistogram) {
-        out += renderGroupHistogram(rows, terminalWidth, useTokens);
+        out += renderGroupHistogram(flattened, terminalWidth, useTokens);
       } else {
-        out += renderTableRows(rows, hasTokenData, useTokens);
+        out += renderFlatGroupedList(flattened, useTokens);
+      }
+    } else {
+      for (const group of agg.groups) {
+        out += `\n${group.label}:\n`;
+        const rows = group.items;
+        const hasTokenData = rows.some((r) => r.inputTokens !== undefined || r.outputTokens !== undefined);
+
+        if (showHistogram) {
+          out += renderGroupHistogram(rows, terminalWidth, useTokens);
+        } else {
+          out += renderTableRows(rows, hasTokenData, useTokens);
+        }
       }
     }
   } else if (agg.kind === "timeSeries") {
@@ -163,6 +227,54 @@ export function renderText(agg: CostAggregate, opts: RenderOptions = {}): string
 // ---------------------------------------------------------------------------
 // Histogram rendering for a group of items (AggregateRow or TimeBucket)
 // ---------------------------------------------------------------------------
+
+// Flat one-line-per-group rendering: `  label    $cost    N sessions`
+function renderFlatGroupedList(
+  rows: AggregateRow[],
+  useTokens: boolean,
+): string {
+  if (rows.length === 0) {
+    return "  (no data)\n";
+  }
+
+  let maxLabelLen = 0;
+  for (const r of rows) {
+    if (r.label.length > maxLabelLen) {
+      maxLabelLen = r.label.length;
+    }
+  }
+
+  const valueStrs = rows.map((r) => {
+    return useTokens ? humanizeTokens(tokenSum(r)) : formatCost(r.costAmount);
+  });
+
+  let maxValueLen = 0;
+  for (const s of valueStrs) {
+    if (s.length > maxValueLen) {
+      maxValueLen = s.length;
+    }
+  }
+
+  const { strs: countStrs, width: countWidth } = formatSessionCounts(
+    rows.map((r) => r.sessionCount),
+  );
+
+  const out: string[] = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (r === undefined) {
+      continue;
+    }
+    let line = `  ${r.label.padEnd(maxLabelLen)}  ${valueStrs[i].padStart(maxValueLen)}`;
+    if (countWidth > 0) {
+      line += `  ${countStrs[i]}`;
+    }
+    out.push(line + "\n");
+  }
+
+  return out.join("");
+}
 
 function renderGroupHistogram(
   items: (AggregateRow | TimeBucket)[],
@@ -198,22 +310,11 @@ function renderGroupHistogram(
     }
   }
 
-  const countStrs = items.map((item) => {
-    const n = (item as { sessionCount?: number }).sessionCount;
-    if (n === undefined) {
-      return "";
-    }
-    return `${n} session${n === 1 ? "" : "s"}`;
-  });
+  const { strs: countStrs, width: countWidth } = formatSessionCounts(
+    items.map((it) => (it as { sessionCount?: number }).sessionCount),
+  );
 
-  let maxCountLen = 0;
-  for (const s of countStrs) {
-    if (s.length > maxCountLen) {
-      maxCountLen = s.length;
-    }
-  }
-
-  const countCol = maxCountLen > 0 ? maxCountLen + 2 : 0;
+  const countCol = countWidth > 0 ? countWidth + 2 : 0;
 
   // Layout: "  <label>  <value>  <bar>  <count>  \n"
   // 2-space left gutter + 2-space right gutter.
@@ -235,8 +336,8 @@ function renderGroupHistogram(
     const label = getItemLabel(item).padEnd(maxLabelLen);
     const value = valueStrs[i].padStart(maxValueLen);
     let line = `  ${label}  ${value}  ${bars[i]}`;
-    if (maxCountLen > 0) {
-      line += `  ${countStrs[i].padStart(maxCountLen)}`;
+    if (countWidth > 0) {
+      line += `  ${countStrs[i]}`;
     }
     out.push(line + "\n");
   }

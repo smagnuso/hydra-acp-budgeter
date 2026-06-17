@@ -33,7 +33,7 @@ function runReset(): void {
     process.stdout.write("hydra-acp-budgeter accumulated cost reset\n");
 }
 
-const COST_HELP = `Usage: hydra budgeter cost [OPTIONS]
+const COST_HELP = `Usage: hydra budgeter usage [OPTIONS]
 
 Options:
   --since <date|duration>  Only include sessions updated after this date (e.g. 7d, 2024-01-01)
@@ -100,13 +100,13 @@ async function runCost(argv: string[]): Promise<void> {
         } else if (arg === "--json") {
             json = true;
         } else if (arg.startsWith("--")) {
-            const err = new Error(`Unknown option: ${arg}\nRun "hydra budgeter cost --help" for usage.`);
+            const err = new Error(`Unknown option: ${arg}\nRun "hydra budgeter usage --help" for usage.`);
             throw err;
         }
     }
 
     if (metric !== undefined && metric !== "cost" && metric !== "tokens") {
-        const err = new Error("Invalid --metric value. Must be 'cost' or 'tokens'.\nRun \"hydra budgeter cost --help\" for usage.");
+        const err = new Error("Invalid --metric value. Must be 'cost' or 'tokens'.\nRun \"hydra budgeter usage --help\" for usage.");
         throw err;
     }
 
@@ -117,7 +117,7 @@ async function runCost(argv: string[]): Promise<void> {
             parsedSince = parseSince(since);
         } catch (err) {
             const e = err as Error;
-            const parseErr = new Error(`Invalid --since value: ${e.message}\nRun "hydra budgeter cost --help" for usage.`);
+            const parseErr = new Error(`Invalid --since value: ${e.message}\nRun "hydra budgeter usage --help" for usage.`);
             throw parseErr;
         }
     }
@@ -232,8 +232,8 @@ function printUsage(): void {
         `hydra-acp-budgeter ${readVersion()}\n` +
             `\n` +
             `Usage:\n` +
-            `  hydra budgeter [cost] <flags> Report historical cost across sessions\n` +
-            `  hydra budgeter reset          Zero the accumulated-cost baseline\n` +
+      `  hydra budgeter [usage] <flags> Report historical cost/usage across sessions\n` +
+      `  hydra budgeter reset           Zero the accumulated-cost baseline\n` +
             `\n` +
             `Flags:\n` +
             `  -v, --version                 Print version and exit\n` +
@@ -248,7 +248,7 @@ async function main(): Promise<void> {
         return;
     }
     if (argv[0] === "help" || argv.includes("--help") || argv.includes("-h")) {
-        if (argv[0] !== "cost") {
+        if (argv[0] !== "usage" && argv[0] !== "cost") {
             printUsage();
             return;
         }
@@ -257,7 +257,7 @@ async function main(): Promise<void> {
         runReset();
         return;
     }
-    if (argv[0] === "cost") {
+    if (argv[0] === "usage" || argv[0] === "cost") {
         await runCost(argv.slice(1));
         return;
     }

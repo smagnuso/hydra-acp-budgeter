@@ -82,25 +82,23 @@ test("renderText grouped: shows headline with group count", () => {
   assert.ok(result.includes("Total: $4.50 across 2 group(s)"));
 });
 
-test("renderText grouped: shows group headers", () => {
+test("renderText grouped: lists group labels as flat rows", () => {
   const agg = makeGrouped();
   const result = renderText(agg);
-  assert.ok(result.includes("\nmyapp:\n"));
-  assert.ok(result.includes("\nother:\n"));
+  assert.ok(result.includes("myapp"));
+  assert.ok(result.includes("other"));
 });
 
-test("renderText grouped: renders table with label and cost columns", () => {
+test("renderText grouped: shows label and cost per row", () => {
   const agg = makeGrouped();
   const result = renderText(agg);
-  assert.ok(result.includes("Label"));
-  assert.ok(result.includes("Cost"));
-  assert.ok(result.includes("sess_001"));
+  assert.ok(result.includes("myapp"));
   assert.ok(result.includes("$1.50"));
-  assert.ok(result.includes("sess_002"));
+  assert.ok(result.includes("other"));
   assert.ok(result.includes("$3.00"));
 });
 
-test("renderText grouped: shows token column when token data present and --tokens", () => {
+test("renderText grouped: shows token values when --tokens", () => {
   const agg: CostAggregate = {
     kind: "grouped",
     groups: [
@@ -110,11 +108,10 @@ test("renderText grouped: shows token column when token data present and --token
   };
   const opts: RenderOptions = { tokens: true };
   const result = renderText(agg, opts);
-  assert.ok(result.includes("Tokens"));
   assert.ok(result.includes("142k"));
 });
 
-test("renderText grouped: shows both cost and tokens side-by-side when token data present", () => {
+test("renderText grouped: cost-only by default even when token data is present", () => {
   const agg: CostAggregate = {
     kind: "grouped",
     groups: [
@@ -123,11 +120,7 @@ test("renderText grouped: shows both cost and tokens side-by-side when token dat
     currency: "USD",
   };
   const result = renderText(agg);
-  assert.ok(result.includes("Cost"));
-  assert.ok(result.includes("Tokens"));
   assert.ok(result.includes("$0.50"));
-  // 142000 + 38100 = 180100 → "180.1k"
-  assert.ok(result.includes("180.1k"));
 });
 
 test("renderText grouped: handles <unknown> bucket label", () => {
@@ -292,24 +285,25 @@ test("renderText: humanizes token values correctly", () => {
     ],
     currency: "USD",
   };
-  let result = renderText(agg);
+  const opts: RenderOptions = { tokens: true };
+  let result = renderText(agg, opts);
   assert.ok(result.includes("999"));
 
   agg.groups[0].items[0].inputTokens = 142000;
-  result = renderText(agg);
+  result = renderText(agg, opts);
   assert.ok(result.includes("142k"));
 
   agg.groups[0].items[0].inputTokens = 3810000;
-  result = renderText(agg);
+  result = renderText(agg, opts);
   assert.ok(result.includes("3.81M"));
 
   agg.groups[0].items[0].inputTokens = 1500000000;
-  result = renderText(agg);
+  result = renderText(agg, opts);
   assert.ok(result.includes("1.5B"));
 
   // Test clean integer formatting
   agg.groups[0].items[0].inputTokens = 2000000;
-  result = renderText(agg);
+  result = renderText(agg, opts);
   assert.ok(result.includes("2M"));
 });
 

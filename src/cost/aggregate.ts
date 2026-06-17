@@ -262,12 +262,13 @@ function resolveDirRoot(opts: AggregateOptions): string {
 /**
  * Compute a directory-group label for a session's cwd.
  *
- * Uses the grouping root to determine relative path, then takes the first
- * `depth` segments. Sessions without a usable cwd land in `<unknown>`.
+ * When `depth` is undefined, returns the full cwd (with $HOME shortened to
+ * `~`). When `depth` is a positive integer, takes the first `depth` path
+ * segments below the grouping root.
  */
 function dirGroupLabel(
   cwd: string | undefined,
-  depth: number,
+  depth: number | undefined,
   root: string,
 ): string {
   if (cwd === undefined || cwd === "") {
@@ -275,6 +276,18 @@ function dirGroupLabel(
   }
 
   const resolvedCwd = realpathCached(resolve(cwd));
+
+  if (depth === undefined) {
+    const home = realpathCached(resolve(homedir()));
+    if (resolvedCwd === home) {
+      return "~";
+    }
+    if (resolvedCwd.startsWith(home + "/")) {
+      return "~/" + resolvedCwd.slice(home.length + 1);
+    }
+    return resolvedCwd;
+  }
+
   const resolvedRoot = realpathCached(resolve(root));
   let relPath = relative(resolvedRoot, resolvedCwd);
 
@@ -423,11 +436,13 @@ export function aggregate(
   // Grouping key function.
   const groupKey = (r: SessionRecord): string => {
     if (opts.by === "dir") {
-      return dirGroupLabel(r.cwd, opts.depth ?? 1, resolveDirRoot(opts));
+      return dirGroupLabel(r.cwd, opts.depth, resolveDirRoot(opts));
     }
 
     if (opts.by === "session") {
-      return r.sessionId;
+      return r.sessionId.startsWith("hydra_session_")
+        ? r.sessionId.slice("hydra_session_".length)
+        : r.sessionId;
     }
 
     if (opts.by === "model") {
@@ -555,11 +570,16 @@ export function aggregate(
       let grp = groupsMap.get(key);
 
       if (grp === undefined) {
-        grp = { label: key, rows: { label: key, costAmount: 0, deltaCost: 0 } };
+        grp = { label: key, rows: { label: key, costAmount: 0, deltaCost: 0, sessionCount: 0 } };
         groupsMap.set(key, grp);
       }
 
       grp.rows.costAmount += r.costAmount;
+      grp.rows.sessionCount = (grp.rows.sessionCount ?? 0) + 1;
+      if (opts.tokens === true) {
+        if (grp.rows.inputTokens === undefined) grp.rows.inputTokens = 0;
+        grp.rows.inputTokens += r.contextTokens;
+      }
 
       // Sum deltas and tokens from events when available.
       const evts = eventMap.get(r.sessionId);
