@@ -612,25 +612,6 @@ export function aggregate(
     return { kind: "grouped", groups, currency };
   }
 
-  // Time-bucketed views attribute each session's total costAmount to a
-  // single bucket keyed by its updatedAt. Per-event history.jsonl entries
-  // are no longer recorded by the daemon (cli writes _currentUsage straight
-  // to meta.json), so meta is the only complete data source. Loses
-  // intra-session resolution but covers 100% of sessions.
-  //
-  // Tokens metric uses each session's peak context-window occupancy
-  // (meta.json's currentUsage.used). This is not lifetime tokens spent —
-  // the agent doesn't report that — but it's the only token-related signal
-  // available and is useful for spotting big-context sessions. Summed into
-  // the bucket's inputTokens slot since the formatter reads from there.
-  const accrueTokens = (bucket: TimeBucket, r: SessionRecord): void => {
-    if (opts.tokens !== true) {
-      return;
-    }
-    if (bucket.inputTokens === undefined) bucket.inputTokens = 0;
-    bucket.inputTokens += r.contextTokens;
-  };
-
   // Time-bucketed cases use per-turn usage_update events when available.
   // Each event carries a cumulative-cost snapshot; per-session delta =
   // max(0, current - previous). Falls back to lump-at-updatedAt for
@@ -710,25 +691,13 @@ export function aggregate(
     }
   };
 
-  // Lump-at-updatedAt fallback for a session with no recorded events.
-  // Used for sessions that predate T1's per-turn persistence.
-  const accrueLump = (
-    groupBuckets: Map<string, TimeBucket>,
-    r: SessionRecord,
-  ): void => {
-    const bk = bucketKey(r.updatedAt);
-    let bucket = groupBuckets.get(bk) as
-      | (TimeBucket & { _sessions?: Set<string> })
-      | undefined;
-    if (bucket === undefined) {
-      bucket = { bucket: bk, costAmount: 0, deltaCost: 0, sessionCount: 0 };
-      groupBuckets.set(bk, bucket);
-    }
-    bucket.costAmount += r.costAmount;
-    bucket.deltaCost += r.costAmount;
-    trackSession(bucket, r.sessionId);
-    accrueTokens(bucket, r);
-  };
+    // Sessions with zero usage_update events are skipped from time-bucketed
+  // views. The daemon has told us nothing about WHEN their
+  // currentUsage.costAmount was spent, and for resurrected sessions that
+  // number is the lineage cumulative inherited from upstream — lumping it
+  // at updatedAt fabricates a spike at the resurrect moment. They still
+  // appear in non-bucketed `--since` totals via the records path.
+
 
   // -----------------------------------------------------------------------
   // Case 3: Bucketing with grouping (--by + --bucket)
@@ -747,25 +716,24 @@ export function aggregate(
     };
 
     for (const r of filtered) {
-      const groupBuckets = getGroupBuckets(r);
       const sessionEvents = eventsBySession.get(r.sessionId);
-      if (sessionEvents !== undefined && sessionEvents.length > 0) {
-        // The first event's cumulative is a baseline, not a delta — we
-        // don't know how that spend was distributed in time. Sessions
-        // that pre-existed T1's per-turn recording would otherwise dump
-        // a huge "pre-recording" lump into the first event's bucket.
-        let prev = sessionEvents[0].cumulativeCost;
-        for (let i = 1; i < sessionEvents.length; i++) {
-          const ev = sessionEvents[i];
-          const delta = Math.max(0, ev.cumulativeCost - prev);
-          prev = ev.cumulativeCost;
-          if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) {
-            continue;
-          }
-          accrueEvent(groupBuckets, ev, delta);
+      if (sessionEvents === undefined || sessionEvents.length === 0) {
+        continue;
+      }
+      const groupBuckets = getGroupBuckets(r);
+      // The first event's cumulative is a baseline, not a delta — we
+      // don't know how that spend was distributed in time. Sessions
+      // that pre-existed T1's per-turn recording would otherwise dump
+      // a huge "pre-recording" lump into the first event's bucket.
+      let prev = sessionEvents[0].cumulativeCost;
+      for (let i = 1; i < sessionEvents.length; i++) {
+        const ev = sessionEvents[i];
+        const delta = Math.max(0, ev.cumulativeCost - prev);
+        prev = ev.cumulativeCost;
+        if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) {
+          continue;
         }
-      } else {
-        accrueLump(groupBuckets, r);
+        accrueEvent(groupBuckets, ev, delta);
       }
     }
 
@@ -791,21 +759,20 @@ export function aggregate(
 
   for (const r of filtered) {
     const sessionEvents = eventsBySession.get(r.sessionId);
-    if (sessionEvents !== undefined && sessionEvents.length > 0) {
-      // First event's cumulative is the baseline; deltas start at #2.
-      // See comment in case 3 above for rationale.
-      let prev = sessionEvents[0].cumulativeCost;
-      for (let i = 1; i < sessionEvents.length; i++) {
-        const ev = sessionEvents[i];
-        const delta = Math.max(0, ev.cumulativeCost - prev);
-        prev = ev.cumulativeCost;
-        if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) {
-          continue;
-        }
-        accrueEvent(bucketsMap, ev, delta);
+    if (sessionEvents === undefined || sessionEvents.length === 0) {
+      continue;
+    }
+    // First event's cumulative is the baseline; deltas start at #2.
+    // See comment in case 3 above for rationale.
+    let prev = sessionEvents[0].cumulativeCost;
+    for (let i = 1; i < sessionEvents.length; i++) {
+      const ev = sessionEvents[i];
+      const delta = Math.max(0, ev.cumulativeCost - prev);
+      prev = ev.cumulativeCost;
+      if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) {
+        continue;
       }
-    } else {
-      accrueLump(bucketsMap, r);
+      accrueEvent(bucketsMap, ev, delta);
     }
   }
 

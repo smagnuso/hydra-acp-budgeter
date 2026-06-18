@@ -213,7 +213,12 @@ test("aggregate with --bucket day: creates kind=timeSeries output", () => {
   const result = aggregate([
     makeSession({ sessionId: "a", costAmount: 1.0, updatedAt: "2026-06-15T12:00:00.000Z" }),
     makeSession({ sessionId: "b", costAmount: 2.5, updatedAt: "2026-06-14T18:00:00.000Z" }),
-  ], undefined, { bucket: "day" });
+  ], [
+    makeEvent({ sessionId: "a", cumulativeCost: 0.0, ts: "2026-06-15T11:00:00.000Z" }),
+    makeEvent({ sessionId: "a", cumulativeCost: 1.0, ts: "2026-06-15T12:00:00.000Z" }),
+    makeEvent({ sessionId: "b", cumulativeCost: 0.0, ts: "2026-06-14T17:00:00.000Z" }),
+    makeEvent({ sessionId: "b", cumulativeCost: 2.5, ts: "2026-06-14T18:00:00.000Z" }),
+  ], { bucket: "day" });
   assert.equal(result.kind, "timeSeries");
   const ts = result as Extract<typeof result, { kind: "timeSeries" }>;
   assert.equal(ts.timeSeries.length, 2);
@@ -224,7 +229,12 @@ test("aggregate with --bucket week: groups by ISO week", () => {
   const result = aggregate([
     makeSession({ sessionId: "a", costAmount: 1.0, updatedAt: "2026-06-15T12:00:00.000Z" }),
     makeSession({ sessionId: "b", costAmount: 2.0, updatedAt: "2026-06-17T12:00:00.000Z" }),
-  ], undefined, { bucket: "week" });
+  ], [
+    makeEvent({ sessionId: "a", cumulativeCost: 0.0, ts: "2026-06-15T11:00:00.000Z" }),
+    makeEvent({ sessionId: "a", cumulativeCost: 1.0, ts: "2026-06-15T12:00:00.000Z" }),
+    makeEvent({ sessionId: "b", cumulativeCost: 0.0, ts: "2026-06-17T11:00:00.000Z" }),
+    makeEvent({ sessionId: "b", cumulativeCost: 2.0, ts: "2026-06-17T12:00:00.000Z" }),
+  ], { bucket: "week" });
   assert.equal(result.kind, "timeSeries");
   const ts = result as Extract<typeof result, { kind: "timeSeries" }>;
   assert.equal(ts.timeSeries.length, 1);
@@ -234,7 +244,12 @@ test("aggregate with --bucket month: groups by calendar month", () => {
   const result = aggregate([
     makeSession({ sessionId: "a", costAmount: 1.0, updatedAt: "2026-06-01T12:00:00.000Z" }),
     makeSession({ sessionId: "b", costAmount: 2.0, updatedAt: "2026-07-15T12:00:00.000Z" }),
-  ], undefined, { bucket: "month" });
+  ], [
+    makeEvent({ sessionId: "a", cumulativeCost: 0.0, ts: "2026-06-01T11:00:00.000Z" }),
+    makeEvent({ sessionId: "a", cumulativeCost: 1.0, ts: "2026-06-01T12:00:00.000Z" }),
+    makeEvent({ sessionId: "b", cumulativeCost: 0.0, ts: "2026-07-15T11:00:00.000Z" }),
+    makeEvent({ sessionId: "b", cumulativeCost: 2.0, ts: "2026-07-15T12:00:00.000Z" }),
+  ], { bucket: "month" });
   assert.equal(result.kind, "timeSeries");
   const ts = result as Extract<typeof result, { kind: "timeSeries" }>;
   assert.equal(ts.timeSeries.length, 2);
@@ -245,7 +260,14 @@ test("aggregate with --bucket sorts time series by bucket key", () => {
     makeSession({ sessionId: "a", costAmount: 0.3, updatedAt: "2026-06-15T12:00:00.000Z" }),
     makeSession({ sessionId: "b", costAmount: 0.1, updatedAt: "2026-06-13T12:00:00.000Z" }),
     makeSession({ sessionId: "c", costAmount: 0.2, updatedAt: "2026-06-14T12:00:00.000Z" }),
-  ], undefined, { bucket: "day" });
+  ], [
+    makeEvent({ sessionId: "a", cumulativeCost: 0.0, ts: "2026-06-15T11:00:00.000Z" }),
+    makeEvent({ sessionId: "a", cumulativeCost: 0.3, ts: "2026-06-15T12:00:00.000Z" }),
+    makeEvent({ sessionId: "b", cumulativeCost: 0.0, ts: "2026-06-13T11:00:00.000Z" }),
+    makeEvent({ sessionId: "b", cumulativeCost: 0.1, ts: "2026-06-13T12:00:00.000Z" }),
+    makeEvent({ sessionId: "c", cumulativeCost: 0.0, ts: "2026-06-14T11:00:00.000Z" }),
+    makeEvent({ sessionId: "c", cumulativeCost: 0.2, ts: "2026-06-14T12:00:00.000Z" }),
+  ], { bucket: "day" });
   assert.equal(result.kind, "timeSeries");
   const ts = result as Extract<typeof result, { kind: "timeSeries" }>;
   assert.equal(ts.timeSeries.length, 3);
@@ -289,10 +311,16 @@ test("aggregate with --by session + --bucket day: sessions without cwd still app
 test("aggregate infers --since when --bucket day without explicit --since", () => {
   const recent = new Date();
   recent.setDate(recent.getDate() - 5);
+  const recentBaseline = new Date(recent.getTime() - 60_000).toISOString();
   const result = aggregate([
     makeSession({ sessionId: "old", costAmount: 10.0, updatedAt: "2024-01-01T00:00:00.000Z" }),
     makeSession({ sessionId: "new", costAmount: 5.0, updatedAt: recent.toISOString() }),
-  ], undefined, { bucket: "day" });
+  ], [
+    makeEvent({ sessionId: "old", cumulativeCost: 0.0, ts: "2024-01-01T00:00:00.000Z" }),
+    makeEvent({ sessionId: "old", cumulativeCost: 10.0, ts: "2024-01-01T00:01:00.000Z" }),
+    makeEvent({ sessionId: "new", cumulativeCost: 0.0, ts: recentBaseline }),
+    makeEvent({ sessionId: "new", cumulativeCost: 5.0, ts: recent.toISOString() }),
+  ], { bucket: "day" });
   assert.equal(result.kind, "timeSeries");
   const ts = result as Extract<typeof result, { kind: "timeSeries" }>;
   const total = ts.timeSeries.reduce((sum, b) => sum + b.costAmount, 0);
@@ -356,12 +384,15 @@ test("aggregate grouped: sessions without events still appear with costAmount", 
   assert.ok(sg!.items[0].deltaCost === undefined || sg!.items[0].deltaCost === 0);
 });
 
-test("aggregate timeSeries: bucket is taken from session updatedAt (no events needed)", () => {
+test("aggregate timeSeries: sessions without events are omitted from buckets", () => {
+  // A session that has costAmount but zero usage_update events is skipped
+  // from time-bucketed views — we have no idea WHEN that cost was spent,
+  // and for resurrected sessions the costAmount is inherited lineage
+  // cumulative, not new spend.
   const result = aggregate([makeSession({ sessionId: "a", costAmount: 1.0, updatedAt: "2026-06-15T12:00:00.000Z" })], undefined, { bucket: "day" });
   assert.equal(result.kind, "timeSeries");
   const ts = result as Extract<typeof result, { kind: "timeSeries" }>;
-  assert.equal(ts.timeSeries.length, 1);
-  assert.equal(ts.timeSeries[0].costAmount, 1.0);
+  assert.equal(ts.timeSeries.length, 0);
 });
 
 test("applyFilters dir prefix-match: ~/dev/hydra-acp does not match ~/dev/hydra-acp-other", () => {
