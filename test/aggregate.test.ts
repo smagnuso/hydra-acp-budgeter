@@ -265,7 +265,21 @@ test("aggregate with --by session + --bucket day: creates kind=timeSeriesGrouped
 });
 
 test("aggregate with --by session + --bucket day: sessions without cwd still appear", () => {
-  const result = aggregate([makeSession({ sessionId: "a", cwd: undefined, costAmount: 1.0 }), makeSession({ sessionId: "b", cwd: "/home/user/projects/myapp", costAmount: 2.0 })], [makeEvent({ sessionId: "a", deltaCost: 0.1, ts: "2026-06-15T12:00:00.000Z" }), makeEvent({ sessionId: "b", deltaCost: 0.2, ts: "2026-06-15T13:00:00.000Z" })], { by: "session", bucket: "day" });
+  // Two events per session: the first establishes the baseline, the
+  // second produces the first counted delta.
+  const result = aggregate(
+    [
+      makeSession({ sessionId: "a", cwd: undefined, costAmount: 1.0 }),
+      makeSession({ sessionId: "b", cwd: "/home/user/projects/myapp", costAmount: 2.0 }),
+    ],
+    [
+      makeEvent({ sessionId: "a", cumulativeCost: 0.0, ts: "2026-06-15T11:00:00.000Z" }),
+      makeEvent({ sessionId: "a", cumulativeCost: 0.1, ts: "2026-06-15T12:00:00.000Z" }),
+      makeEvent({ sessionId: "b", cumulativeCost: 0.0, ts: "2026-06-15T12:30:00.000Z" }),
+      makeEvent({ sessionId: "b", cumulativeCost: 0.2, ts: "2026-06-15T13:00:00.000Z" }),
+    ],
+    { by: "session", bucket: "day" },
+  );
   assert.equal(result.kind, "timeSeriesGrouped");
   const tsg = result as Extract<typeof result, { kind: "timeSeriesGrouped" }>;
   assert.ok(tsg.groups.some(g => g.label === "a"));

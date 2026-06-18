@@ -9,7 +9,7 @@ import { DEFAULT_RULE } from "./rule.js";
 import { deleteStateFile } from "./tracker.js";
 import { logger, setDebug } from "./util/log.js";
 import { scanSessions } from "./cost/session-store.js";
-import { listSessionsFromDaemon } from "./cost/daemon-client.js";
+import { listSessionsFromDaemon, fetchUsageEventsFromDaemon } from "./cost/daemon-client.js";
 import { streamHistoryEvents } from "./cost/history-stream.js";
 import type { CostEvent } from "./cost/history-stream.js";
 import { aggregate, applyFilters, parseSince } from "./cost/aggregate.js";
@@ -166,14 +166,29 @@ async function runCost(argv: string[]): Promise<void> {
         minMetric: useTokens ? "tokens" : "cost",
     });
 
-    const needsEvents = false;
-
+    // Fetch per-turn usage events from the daemon when a bucket view is
+    // requested. Each event carries cumulative cost + ts; the aggregator
+    // diffs them per session for proper time-bucketing instead of lumping
+    // each session's full cost at meta.updatedAt.
+    //
+    // NOTE: we deliberately do NOT pass `since` to the daemon here. The
+    // daemon's `since` filter cuts events at the window boundary, which
+    // would make the first in-window event's cumulative get attributed
+    // entirely as a delta (re-creating the lump-at-boundary problem).
+    // The aggregator's bucketKey + records.updatedAt pre-filter already
+    // handles window slicing on its end.
     let events: CostEvent[] | undefined = undefined;
-
-    if (needsEvents) {
-        events = [];
-        for await (const ev of streamHistoryEvents(records)) {
-            events.push(ev);
+    if (bucket !== undefined) {
+        const wireEvents = await fetchUsageEventsFromDaemon();
+        if (wireEvents !== undefined) {
+            events = wireEvents.map((e) => ({
+                sessionId: e.sessionId,
+                ts: e.ts,
+                deltaCost: 0,
+                cumulativeCost: e.costCumulative,
+                currency: e.costCurrency,
+                inputTokens: e.contextTokens,
+            }));
         }
     }
 

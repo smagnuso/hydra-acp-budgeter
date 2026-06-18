@@ -631,41 +631,151 @@ export function aggregate(
     bucket.inputTokens += r.contextTokens;
   };
 
+  // Time-bucketed cases use per-turn usage_update events when available.
+  // Each event carries a cumulative-cost snapshot; per-session delta =
+  // max(0, current - previous). Falls back to lump-at-updatedAt for
+  // sessions that have no events (legacy / pre-T1 sessions). Sessions
+  // are looked up by id; events with no matching record are skipped
+  // (they were filtered out — out of dir/interactive scope).
+  const filteredById = new Map<string, SessionRecord>();
+  for (const r of filtered) {
+    filteredById.set(r.sessionId, r);
+  }
+
+  // Group events by sessionId, sorted by ts ascending (the daemon's
+  // /v1/sessions/events endpoint already sorts but we don't rely on it).
+  const eventsBySession = new Map<string, CostEvent[]>();
+  if (events !== undefined) {
+    for (const ev of events) {
+      if (!filteredById.has(ev.sessionId)) {
+        continue;
+      }
+      const list = eventsBySession.get(ev.sessionId);
+      if (list === undefined) {
+        eventsBySession.set(ev.sessionId, [ev]);
+      } else {
+        list.push(ev);
+      }
+    }
+    for (const list of eventsBySession.values()) {
+      list.sort((a, b) => a.ts.localeCompare(b.ts));
+    }
+  }
+
+  // Per-bucket session-id tracking so sessionCount counts unique
+  // sessions per bucket (a session spanning N buckets contributes 1 to
+  // each, not N to one).
+  const trackSession = (
+    bucket: TimeBucket & { _sessions?: Set<string> },
+    sessionId: string,
+  ): void => {
+    if (bucket._sessions === undefined) {
+      bucket._sessions = new Set<string>();
+    }
+    bucket._sessions.add(sessionId);
+    bucket.sessionCount = bucket._sessions.size;
+  };
+
+  const finalize = (bucket: TimeBucket & { _sessions?: Set<string> }): void => {
+    delete bucket._sessions;
+  };
+
+  // Accumulate one event's delta into the bucket map. The bucket key
+  // comes from the event's ts; the delta from the running prevCumulative.
+  // `groupBuckets` is the per-group buckets map (case 3) or the flat
+  // bucketsMap (case 4).
+  const accrueEvent = (
+    groupBuckets: Map<string, TimeBucket>,
+    ev: CostEvent,
+    delta: number,
+  ): void => {
+    const bk = bucketKey(ev.ts);
+    let bucket = groupBuckets.get(bk) as
+      | (TimeBucket & { _sessions?: Set<string> })
+      | undefined;
+    if (bucket === undefined) {
+      bucket = { bucket: bk, costAmount: 0, deltaCost: 0, sessionCount: 0 };
+      groupBuckets.set(bk, bucket);
+    }
+    bucket.costAmount += delta;
+    bucket.deltaCost += delta;
+    trackSession(bucket, ev.sessionId);
+    if (opts.tokens === true) {
+      if (
+        bucket.inputTokens === undefined ||
+        (ev.inputTokens ?? 0) > bucket.inputTokens
+      ) {
+        bucket.inputTokens = ev.inputTokens ?? bucket.inputTokens ?? 0;
+      }
+    }
+  };
+
+  // Lump-at-updatedAt fallback for a session with no recorded events.
+  // Used for sessions that predate T1's per-turn persistence.
+  const accrueLump = (
+    groupBuckets: Map<string, TimeBucket>,
+    r: SessionRecord,
+  ): void => {
+    const bk = bucketKey(r.updatedAt);
+    let bucket = groupBuckets.get(bk) as
+      | (TimeBucket & { _sessions?: Set<string> })
+      | undefined;
+    if (bucket === undefined) {
+      bucket = { bucket: bk, costAmount: 0, deltaCost: 0, sessionCount: 0 };
+      groupBuckets.set(bk, bucket);
+    }
+    bucket.costAmount += r.costAmount;
+    bucket.deltaCost += r.costAmount;
+    trackSession(bucket, r.sessionId);
+    accrueTokens(bucket, r);
+  };
+
   // -----------------------------------------------------------------------
   // Case 3: Bucketing with grouping (--by + --bucket)
   // -----------------------------------------------------------------------
   if (opts.by !== undefined && opts.bucket !== undefined) {
     const groupsMap = new Map<string, { label: string; buckets: Map<string, TimeBucket> }>();
 
-    for (const r of filtered) {
+    const getGroupBuckets = (r: SessionRecord): Map<string, TimeBucket> => {
       const key = groupKey(r);
       let grp = groupsMap.get(key);
-
       if (grp === undefined) {
         grp = { label: key, buckets: new Map() };
         groupsMap.set(key, grp);
       }
+      return grp.buckets;
+    };
 
-      const bk = bucketKey(r.updatedAt);
-      let bucket = grp.buckets.get(bk);
-
-      if (bucket === undefined) {
-        bucket = { bucket: bk, costAmount: 0, deltaCost: 0, sessionCount: 0 };
-        grp.buckets.set(bk, bucket);
+    for (const r of filtered) {
+      const groupBuckets = getGroupBuckets(r);
+      const sessionEvents = eventsBySession.get(r.sessionId);
+      if (sessionEvents !== undefined && sessionEvents.length > 0) {
+        // The first event's cumulative is a baseline, not a delta — we
+        // don't know how that spend was distributed in time. Sessions
+        // that pre-existed T1's per-turn recording would otherwise dump
+        // a huge "pre-recording" lump into the first event's bucket.
+        let prev = sessionEvents[0].cumulativeCost;
+        for (let i = 1; i < sessionEvents.length; i++) {
+          const ev = sessionEvents[i];
+          const delta = Math.max(0, ev.cumulativeCost - prev);
+          prev = ev.cumulativeCost;
+          if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) {
+            continue;
+          }
+          accrueEvent(groupBuckets, ev, delta);
+        }
+      } else {
+        accrueLump(groupBuckets, r);
       }
-
-      bucket.costAmount += r.costAmount;
-      bucket.deltaCost += r.costAmount;
-      bucket.sessionCount = (bucket.sessionCount ?? 0) + 1;
-      accrueTokens(bucket, r);
     }
 
     const groups: Group<TimeBucket>[] = [];
-
     for (const grp of groupsMap.values()) {
       const items = Array.from(grp.buckets.values());
+      for (const it of items) {
+        finalize(it as TimeBucket & { _sessions?: Set<string> });
+      }
       items.sort((a, b) => a.bucket.localeCompare(b.bucket));
-
       if (items.length > 0) {
         groups.push({ label: grp.label, items });
       }
@@ -680,21 +790,29 @@ export function aggregate(
   const bucketsMap = new Map<string, TimeBucket>();
 
   for (const r of filtered) {
-    const bk = bucketKey(r.updatedAt);
-    let bucket = bucketsMap.get(bk);
-
-    if (bucket === undefined) {
-      bucket = { bucket: bk, costAmount: 0, deltaCost: 0, sessionCount: 0 };
-      bucketsMap.set(bk, bucket);
+    const sessionEvents = eventsBySession.get(r.sessionId);
+    if (sessionEvents !== undefined && sessionEvents.length > 0) {
+      // First event's cumulative is the baseline; deltas start at #2.
+      // See comment in case 3 above for rationale.
+      let prev = sessionEvents[0].cumulativeCost;
+      for (let i = 1; i < sessionEvents.length; i++) {
+        const ev = sessionEvents[i];
+        const delta = Math.max(0, ev.cumulativeCost - prev);
+        prev = ev.cumulativeCost;
+        if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) {
+          continue;
+        }
+        accrueEvent(bucketsMap, ev, delta);
+      }
+    } else {
+      accrueLump(bucketsMap, r);
     }
-
-    bucket.costAmount += r.costAmount;
-    bucket.deltaCost += r.costAmount;
-    bucket.sessionCount = (bucket.sessionCount ?? 0) + 1;
-    accrueTokens(bucket, r);
   }
 
   const timeSeries: TimeBucket[] = Array.from(bucketsMap.values());
+  for (const it of timeSeries) {
+    finalize(it as TimeBucket & { _sessions?: Set<string> });
+  }
   timeSeries.sort((a, b) => a.bucket.localeCompare(b.bucket));
 
   return { kind: "timeSeries", timeSeries, currency };
