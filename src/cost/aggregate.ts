@@ -124,6 +124,15 @@ export interface FilterOptions {
   since?: Date;
   dir?: string;
   interactive?: boolean | undefined;
+  /** Host filter, matching `hydra session list` semantics:
+   *   "local"   — sessions created here OR imported and bound to a local
+   *               agent (upstreamSessionId set). Default.
+   *   "all"     — every session, no filter.
+   *   <host>    — passive mirrors imported from <host> that haven't been
+   *               attached locally yet.
+   * Undefined behaves like "all" (no filtering) for backwards-compat with
+   * callers that don't pass the option. */
+  host?: string;
   /** Strict lower bound on the active metric. Sessions where the metric
    * value is <= min are dropped. Defaults to 0 — i.e. zero-value sessions
    * are excluded. Pass a negative number to include them. */
@@ -195,6 +204,23 @@ export function applyFilters(
       }
     }
 
+    result = filtered;
+  }
+
+  if (opts.host !== undefined && opts.host !== "all") {
+    const host = opts.host;
+    const filtered: SessionRecord[] = [];
+    for (const r of result) {
+      if (host === "local") {
+        if (!r.importedFromMachine || !!r.upstreamSessionId) {
+          filtered.push(r);
+        }
+      } else {
+        if (r.importedFromMachine === host && !r.upstreamSessionId) {
+          filtered.push(r);
+        }
+      }
+    }
     result = filtered;
   }
 

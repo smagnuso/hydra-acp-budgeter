@@ -43,6 +43,13 @@ export interface SessionRecord {
   title: string;
   createdAt: string;
   updatedAt: string;
+  /** Hostname this session was imported from, if any. Empty/undefined means
+   * the session originated on the local machine. */
+  importedFromMachine?: string;
+  /** Set when an imported session has been bound to a local agent (i.e. the
+   * user has attached to it here). Used together with importedFromMachine
+   * to distinguish "local working copy of an import" from a passive mirror. */
+  upstreamSessionId?: string;
 }
 
 function readMetaJson(sessionPath: string): SessionRecord | undefined {
@@ -110,6 +117,14 @@ function readMetaJson(sessionPath: string): SessionRecord | undefined {
 
   const createdAt = typeof obj.createdAt === "string" ? obj.createdAt : "";
   const updatedAt = typeof obj.updatedAt === "string" ? obj.updatedAt : "";
+  const importedFromMachine =
+    typeof obj.importedFromMachine === "string" && obj.importedFromMachine.length > 0
+      ? obj.importedFromMachine
+      : undefined;
+  const upstreamSessionId =
+    typeof obj.upstreamSessionId === "string" && obj.upstreamSessionId.length > 0
+      ? obj.upstreamSessionId
+      : undefined;
 
   return {
     sessionId,
@@ -123,6 +138,8 @@ function readMetaJson(sessionPath: string): SessionRecord | undefined {
     title,
     createdAt,
     updatedAt,
+    importedFromMachine,
+    upstreamSessionId,
   };
 }
 

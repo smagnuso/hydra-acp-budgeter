@@ -108,6 +108,22 @@ function rowToRecord(row: Record<string, unknown>): SessionRecord | undefined {
         : "";
   const title = typeof row.title === "string" ? row.title : "";
   const interactive = row.interactive === true || ns.interactive === true;
+  const importedFromMachineRaw =
+    typeof row.importedFromMachine === "string"
+      ? row.importedFromMachine
+      : typeof ns.importedFromMachine === "string"
+        ? (ns.importedFromMachine as string)
+        : "";
+  const importedFromMachine =
+    importedFromMachineRaw.length > 0 ? importedFromMachineRaw : undefined;
+  const upstreamSessionIdRaw =
+    typeof row.upstreamSessionId === "string"
+      ? row.upstreamSessionId
+      : typeof ns.upstreamSessionId === "string"
+        ? (ns.upstreamSessionId as string)
+        : "";
+  const upstreamSessionId =
+    upstreamSessionIdRaw.length > 0 ? upstreamSessionIdRaw : undefined;
 
   const usageTop = row.currentUsage as
     | { costAmount?: unknown; costCurrency?: unknown; used?: unknown }
@@ -133,6 +149,8 @@ function rowToRecord(row: Record<string, unknown>): SessionRecord | undefined {
     title,
     createdAt: "",
     updatedAt: topUpdatedAt,
+    importedFromMachine,
+    upstreamSessionId,
   };
 }
 

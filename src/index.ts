@@ -43,6 +43,10 @@ Options:
   --depth <N>              Depth for --by dir grouping (default: 1)
   --dir <path>             Only include sessions under this directory prefix
   --interactive            Only include interactive sessions (default: include both)
+  --host <name|local|all>  Filter sessions by host. "local" (default) shows sessions
+                           created here plus imports attached locally; "all" includes
+                           every session; <name> shows passive mirrors imported from
+                           that host.
   --min <N>                Drop sessions whose active-metric value is <= N (default: 0)
   --histogram              Show an ASCII histogram bar next to each row (implies --bucket week if no bucket given)
   --metric <cost|tokens>   Display metric (default: cost)
@@ -65,6 +69,7 @@ async function runCost(argv: string[]): Promise<void> {
     let histogram = false;
     let metric: string | undefined;
     let json = false;
+    let host: string | undefined;
 
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
@@ -100,6 +105,11 @@ async function runCost(argv: string[]): Promise<void> {
             metric = argv[i];
         } else if (arg === "--json") {
             json = true;
+        } else if (arg === "--host") {
+            i += 1;
+            host = argv[i];
+        } else if (arg.startsWith("--host=")) {
+            host = arg.slice("--host=".length);
         } else if (arg.startsWith("--")) {
             const err = new Error(`Unknown option: ${arg}\nRun "hydra budgeter usage --help" for usage.`);
             throw err;
@@ -164,6 +174,7 @@ async function runCost(argv: string[]): Promise<void> {
         interactive: interactiveOpt,
         min: minVal,
         minMetric: useTokens ? "tokens" : "cost",
+        host: host ?? "local",
     });
 
     // Fetch per-turn usage events from the daemon when a bucket view is
