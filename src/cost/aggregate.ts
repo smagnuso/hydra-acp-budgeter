@@ -15,7 +15,7 @@ export type BucketSpec = "hour" | "day" | "week" | "month";
 export type SinceSpec = string;
 
 /** Grouping dimension for --by. */
-export type GroupBy = "dir" | "session" | "model" | "agent" | "language";
+export type GroupBy = "dir" | "session" | "model" | "agent" | "filetype";
 
 // ---------------------------------------------------------------------------
 // CostAggregate — expressive enough for T4 to render any output shape
@@ -148,7 +148,7 @@ export interface FilterOptions {
 }
 
 function netLocForRecord(r: SessionRecord): number {
-  const map = r.locByLanguage;
+  const map = r.locByFiletype;
   if (map === undefined) {
     return 0;
   }
@@ -498,14 +498,14 @@ export function aggregate(
   //
   // Unlike dir/session/model/agent, a single session contributes to many
   // language groups (one per file extension touched). Fan out per record
-  // across its locByLanguage map. The bucketed variant is handled later in
+  // across its locByFiletype map. The bucketed variant is handled later in
   // the bucketed-LOC branch.
   // -----------------------------------------------------------------------
-  if (opts.by === "language" && opts.bucket === undefined) {
+  if (opts.by === "filetype" && opts.bucket === undefined) {
     const groupsMap = new Map<string, { added: number; removed: number; sessions: Set<string> }>();
     const uniqueSessions = new Set<string>();
     for (const r of filtered) {
-      const map = r.locByLanguage;
+      const map = r.locByFiletype;
       if (map === undefined) continue;
       let touched = false;
       for (const lang of Object.keys(map)) {
@@ -675,7 +675,7 @@ export function aggregate(
       let added = 0;
       let removed = 0;
       for (const r of filtered) {
-        const map = r.locByLanguage;
+        const map = r.locByFiletype;
         if (map === undefined) continue;
         for (const lang of Object.keys(map)) {
           const v = map[lang];
@@ -715,7 +715,7 @@ export function aggregate(
         grp.rows.inputTokens += r.contextTokens;
       }
       if (opts.loc === true) {
-        const map = r.locByLanguage;
+        const map = r.locByFiletype;
         if (map !== undefined) {
           if (grp.rows.linesAdded === undefined) grp.rows.linesAdded = 0;
           if (grp.rows.linesRemoved === undefined) grp.rows.linesRemoved = 0;
@@ -895,16 +895,16 @@ export function aggregate(
 
     // --by language + --bucket → groups keyed by language, with sessionCount
     // deduped within (language, bucket).
-    if (opts.by === "language") {
+    if (opts.by === "filetype") {
       const groupsMap = new Map<string, { label: string; buckets: Map<string, TimeBucket> }>();
       const uniqueSessions = new Set<string>();
       for (const ev of eventsList) {
         if (!sessionIdSet.has(ev.sessionId)) continue;
         if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) continue;
-        let grp = groupsMap.get(ev.language);
+        let grp = groupsMap.get(ev.filetype);
         if (grp === undefined) {
-          grp = { label: ev.language, buckets: new Map() };
-          groupsMap.set(ev.language, grp);
+          grp = { label: ev.filetype, buckets: new Map() };
+          groupsMap.set(ev.filetype, grp);
         }
         const bucket = ensureBucket(grp.buckets, bucketKey(ev.ts));
         accrueEdit(bucket, ev);

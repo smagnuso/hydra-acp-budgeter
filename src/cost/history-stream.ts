@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { logger } from "../util/log.js";
 import type { SessionRecord } from "./session-store.js";
 import { sessionsDir } from "./session-store.js";
-import { languageForPath } from "./language.js";
+import { filetypeForPath } from "./language.js";
 
 const log = logger("cost/history-stream");
 
@@ -27,7 +27,7 @@ export interface EditEvent {
   sessionId: string;
   ts: string;
   path: string;
-  language: string;
+  filetype: string;
   linesAdded: number;
   linesRemoved: number;
 }
@@ -224,10 +224,15 @@ function countLines(s: string): number {
 
 /**
  * Stream history.jsonl line-by-line for the given session(s), yielding one
- * EditEvent per diff payload found in tool_call_update envelopes (Edit and
- * Write tools both surface as update.content[].type === "diff" with path,
- * oldText, newText). One toolCallId may carry multiple file diffs (rare,
- * but supported by the protocol) — each diff yields its own event.
+ * EditEvent per Edit/Write tool invocation that carries a diff payload.
+ *
+ * A single tool invocation may surface multiple envelopes with diff
+ * content — the agent often emits a speculative diff on `tool_call` (or
+ * an early `tool_call_update`) and then a final one on a later
+ * `tool_call_update` after the apply lands. We dedupe per
+ * (toolCallId, diff.path), keeping the LAST diff seen, since that
+ * reflects the committed state. Without dedupe, a single edit can be
+ * counted 2× or more.
  *
  * linesAdded = lines in newText; linesRemoved = lines in oldText. Net LOC
  * for a file is (added - removed); the consumer can compute that.
@@ -257,6 +262,12 @@ export async function* streamHistoryEditEvents(
 
     const stream = createReadStream(historyPath, { encoding: "utf8" });
     const rl = createInterface({ input: stream, crlfDelay: Infinity });
+
+    // Dedupe key: `${toolCallId}|${path}`. Value is the latest event for
+    // that key. We emit at end-of-session so consumers see one event per
+    // unique edit, ordered by first-seen position in the file.
+    const latest = new Map<string, EditEvent>();
+    const order: string[] = [];
 
     try {
       for await (const line of rl) {
@@ -293,6 +304,10 @@ export async function* streamHistoryEditEvents(
         const content = update.content;
         if (!Array.isArray(content) || content.length === 0) continue;
 
+        const toolCallId =
+          typeof update.toolCallId === "string" ? update.toolCallId : "";
+        if (toolCallId === "") continue;
+
         const ts = formatRecordedAt(rec);
 
         for (const c of content) {
@@ -306,19 +321,30 @@ export async function* streamHistoryEditEvents(
           const oldText = typeof item.oldText === "string" ? item.oldText : "";
           const newText = typeof item.newText === "string" ? item.newText : "";
 
-          yield {
+          const key = `${toolCallId}|${path}`;
+          if (!latest.has(key)) {
+            order.push(key);
+          }
+          latest.set(key, {
             sessionId: session.sessionId,
             ts,
             path,
-            language: languageForPath(path),
+            filetype: filetypeForPath(path),
             linesAdded: countLines(newText),
             linesRemoved: countLines(oldText),
-          };
+          });
         }
       }
     } finally {
       rl.close();
       stream.destroy();
+    }
+
+    for (const key of order) {
+      const ev = latest.get(key);
+      if (ev !== undefined) {
+        yield ev;
+      }
     }
   }
 }

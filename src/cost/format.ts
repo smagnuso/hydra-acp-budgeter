@@ -418,7 +418,7 @@ function renderTableRows(
   }
 
   let out = "  ";
-  out += padRight("Label", maxLabelLen);
+  out += padRight("", maxLabelLen);
   out += "  ";
 
   if (useLoc) {

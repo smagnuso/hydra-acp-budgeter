@@ -39,7 +39,7 @@ const COST_HELP = `Usage: hydra budgeter usage [OPTIONS]
 Options:
   --since <date|duration>  Only include sessions updated after this date (e.g. 7d, 2024-01-01)
   --bucket <hour|day|week|month>  Group results into time buckets (implies --since 24h/30d/6m/2y)
-  --by <dir|session|model|agent|language>  Group by dimension (language requires --metric loc)
+  --by <dir|session|model|agent|filetype>  Group by dimension (filetype requires --metric loc)
   --depth <N>              Depth for --by dir grouping (default: 1)
   --dir <path>             Only include sessions under this directory prefix
   --interactive            Only include interactive sessions (default: include both)
@@ -124,8 +124,13 @@ async function runCost(argv: string[]): Promise<void> {
 
     const useLoc = metric === "loc";
 
-    if (by === "language" && !useLoc) {
-        throw new Error("--by language requires --metric loc.\nRun \"hydra budgeter usage --help\" for usage.");
+    const validBy = new Set(["dir", "session", "model", "agent", "filetype"]);
+    if (by !== undefined && !validBy.has(by)) {
+        throw new Error(`Invalid --by value: ${by}. Must be one of: dir, session, model, agent, filetype.\nRun "hydra budgeter usage --help" for usage.`);
+    }
+
+    if (by === "filetype" && !useLoc) {
+        throw new Error("--by filetype requires --metric loc.\nRun \"hydra budgeter usage --help\" for usage.");
     }
 
     let parsedSince: Date | undefined;
@@ -177,9 +182,9 @@ async function runCost(argv: string[]): Promise<void> {
     (await listSessionsFromDaemon()) ?? scanSessions();
 
     // LOC totals aren't carried by meta.json or the daemon's session list —
-    // stream history.jsonl for each survivor to populate locByLanguage.
+    // stream history.jsonl for each survivor to populate locByFiletype.
     // Done before filtering so a --min on loc has data to compare against.
-    if (useLoc || by === "language") {
+    if (useLoc || by === "filetype") {
         await enrichSessionsWithLoc(allRecords);
     }
 
@@ -219,7 +224,7 @@ async function runCost(argv: string[]): Promise<void> {
     }
 
     // For time-bucketed LOC views, stream EditEvents (with timestamps) for
-    // the survivor set. Non-bucketed LOC views use the locByLanguage totals
+    // the survivor set. Non-bucketed LOC views use the locByFiletype totals
     // that enrichSessionsWithLoc already populated, so no streaming here.
     let editEvents: EditEvent[] | undefined = undefined;
     if (useLoc && bucket !== undefined) {
@@ -233,7 +238,7 @@ async function runCost(argv: string[]): Promise<void> {
     const depth = depthStr !== undefined ? parseInt(depthStr, 10) : undefined;
 
     const opts = {
-        by: by as "dir" | "session" | "model" | "agent" | "language" | undefined,
+        by: by as "dir" | "session" | "model" | "agent" | "filetype" | undefined,
         depth,
         bucket: bucket as "day" | "week" | "month" | undefined,
         since: effectiveSince,
