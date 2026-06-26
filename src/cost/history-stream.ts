@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { logger } from "../util/log.js";
 import type { SessionRecord } from "./session-store.js";
 import { sessionsDir } from "./session-store.js";
+import { languageForPath } from "./language.js";
 
 const log = logger("cost/history-stream");
 
@@ -18,6 +19,17 @@ export interface CostEvent {
   outputTokens?: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+}
+
+/** A single edit event emitted from a history.jsonl tool_call_update line
+ *  carrying a diff payload (Edit/Write tools). One event per file diff. */
+export interface EditEvent {
+  sessionId: string;
+  ts: string;
+  path: string;
+  language: string;
+  linesAdded: number;
+  linesRemoved: number;
 }
 
 function readCumulativeFromMeta(
@@ -186,6 +198,123 @@ export async function* streamHistoryEvents(
           ...(cacheReadTokens !== undefined && { cacheReadTokens }),
           ...(cacheWriteTokens !== undefined && { cacheWriteTokens }),
         };
+      }
+    } finally {
+      rl.close();
+      stream.destroy();
+    }
+  }
+}
+
+function countLines(s: string): number {
+  if (s.length === 0) {
+    return 0;
+  }
+  let n = 1;
+  for (let i = 0; i < s.length; i++) {
+    if (s.charCodeAt(i) === 10) {
+      n++;
+    }
+  }
+  if (s.charCodeAt(s.length - 1) === 10) {
+    n--;
+  }
+  return n;
+}
+
+/**
+ * Stream history.jsonl line-by-line for the given session(s), yielding one
+ * EditEvent per diff payload found in tool_call_update envelopes (Edit and
+ * Write tools both surface as update.content[].type === "diff" with path,
+ * oldText, newText). One toolCallId may carry multiple file diffs (rare,
+ * but supported by the protocol) — each diff yields its own event.
+ *
+ * linesAdded = lines in newText; linesRemoved = lines in oldText. Net LOC
+ * for a file is (added - removed); the consumer can compute that.
+ */
+export async function* streamHistoryEditEvents(
+  sessions: SessionRecord | SessionRecord[],
+): AsyncGenerator<EditEvent, void, undefined> {
+  const sessionList = Array.isArray(sessions) ? sessions : [sessions];
+
+  for (const session of sessionList) {
+    const historyPath = resolve(
+      sessionsDir(),
+      session.sessionId,
+      "history.jsonl",
+    );
+
+    try {
+      statSync(historyPath);
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === "ENOENT") {
+        continue;
+      }
+      log.debug(`stat failed for ${historyPath}: ${e.message}`);
+      continue;
+    }
+
+    const stream = createReadStream(historyPath, { encoding: "utf8" });
+    const rl = createInterface({ input: stream, crlfDelay: Infinity });
+
+    try {
+      for await (const line of rl) {
+        if (line.length === 0) continue;
+
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          continue;
+        }
+
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+        const rec = parsed as Record<string, unknown>;
+        if (rec.method !== "session/update") continue;
+
+        const params = (rec.params ?? undefined) as
+          | Record<string, unknown>
+          | undefined;
+        if (!params || typeof params !== "object" || Array.isArray(params)) continue;
+
+        const update = (params.update ?? undefined) as
+          | Record<string, unknown>
+          | undefined;
+        if (!update || typeof update !== "object" || Array.isArray(update)) continue;
+
+        if (
+          update.sessionUpdate !== "tool_call" &&
+          update.sessionUpdate !== "tool_call_update"
+        ) {
+          continue;
+        }
+
+        const content = update.content;
+        if (!Array.isArray(content) || content.length === 0) continue;
+
+        const ts = formatRecordedAt(rec);
+
+        for (const c of content) {
+          if (!c || typeof c !== "object" || Array.isArray(c)) continue;
+          const item = c as Record<string, unknown>;
+          if (item.type !== "diff") continue;
+
+          const path = typeof item.path === "string" ? item.path : "";
+          if (path === "") continue;
+
+          const oldText = typeof item.oldText === "string" ? item.oldText : "";
+          const newText = typeof item.newText === "string" ? item.newText : "";
+
+          yield {
+            sessionId: session.sessionId,
+            ts,
+            path,
+            language: languageForPath(path),
+            linesAdded: countLines(newText),
+            linesRemoved: countLines(oldText),
+          };
+        }
       }
     } finally {
       rl.close();

@@ -2,7 +2,7 @@ import { relative, resolve } from "node:path";
 import { homedir } from "node:os";
 import { realpathSync } from "node:fs";
 import type { SessionRecord } from "./session-store.js";
-import type { CostEvent } from "./history-stream.js";
+import type { CostEvent, EditEvent } from "./history-stream.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -15,7 +15,7 @@ export type BucketSpec = "hour" | "day" | "week" | "month";
 export type SinceSpec = string;
 
 /** Grouping dimension for --by. */
-export type GroupBy = "dir" | "session" | "model" | "agent";
+export type GroupBy = "dir" | "session" | "model" | "agent" | "language";
 
 // ---------------------------------------------------------------------------
 // CostAggregate — expressive enough for T4 to render any output shape
@@ -31,6 +31,8 @@ export interface AggregateRow {
   outputTokens?: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  linesAdded?: number;
+  linesRemoved?: number;
 }
 
 /** A single bucket in a time-series output. */
@@ -43,6 +45,8 @@ export interface TimeBucket {
   outputTokens?: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  linesAdded?: number;
+  linesRemoved?: number;
 }
 
 /** A group (e.g. a directory) containing either rows or time buckets. */
@@ -60,10 +64,10 @@ export interface Group<T> {
  *   timeSeriesGrouped — grouped time series (--by + --bucket)
  */
 export type CostAggregate =
-  | { kind: "total"; row: AggregateRow; currency: string }
-  | { kind: "grouped"; groups: Group<AggregateRow>[]; currency: string }
-  | { kind: "timeSeries"; timeSeries: TimeBucket[]; currency: string }
-  | { kind: "timeSeriesGrouped"; groups: Group<TimeBucket>[]; currency: string };
+  | { kind: "total"; row: AggregateRow; currency: string; totalSessions?: number }
+  | { kind: "grouped"; groups: Group<AggregateRow>[]; currency: string; totalSessions?: number }
+  | { kind: "timeSeries"; timeSeries: TimeBucket[]; currency: string; totalSessions?: number }
+  | { kind: "timeSeriesGrouped"; groups: Group<TimeBucket>[]; currency: string; totalSessions?: number };
 
 // ---------------------------------------------------------------------------
 // parseSince
@@ -138,8 +142,24 @@ export interface FilterOptions {
    * are excluded. Pass a negative number to include them. */
   min?: number;
   /** When true, the min threshold compares against contextTokens; else
-   * against costAmount. */
-  minMetric?: "cost" | "tokens";
+   * against costAmount. "loc" compares against the session's net LOC
+   * (sum over languages of added − removed). */
+  minMetric?: "cost" | "tokens" | "loc";
+}
+
+function netLocForRecord(r: SessionRecord): number {
+  const map = r.locByLanguage;
+  if (map === undefined) {
+    return 0;
+  }
+  let net = 0;
+  for (const k of Object.keys(map)) {
+    const v = map[k];
+    if (v !== undefined) {
+      net += v.added - v.removed;
+    }
+  }
+  return net;
 }
 
 /** realpath normalization cache — shared across applyFilters calls. */
@@ -238,11 +258,17 @@ export function applyFilters(
   }
 
   const min = opts.min ?? 0;
-  const useTokensForMin = opts.minMetric === "tokens";
   const minFiltered: SessionRecord[] = [];
 
   for (const r of result) {
-    const value = useTokensForMin ? r.contextTokens : r.costAmount;
+    let value: number;
+    if (opts.minMetric === "tokens") {
+      value = r.contextTokens;
+    } else if (opts.minMetric === "loc") {
+      value = netLocForRecord(r);
+    } else {
+      value = r.costAmount;
+    }
     if (value > min) {
       minFiltered.push(r);
     }
@@ -263,6 +289,11 @@ export interface AggregateOptions {
   interactive?: boolean | undefined;
   dir?: string;
   tokens?: boolean;
+  /** When true, the active metric is net lines of code rather than cost or
+   * tokens. Mutually exclusive with `tokens`. Time-bucketed LOC is not
+   * supported in this version — callers should reject the combination
+   * before calling aggregate(). */
+  loc?: boolean;
   min?: number;
 }
 
@@ -358,6 +389,7 @@ export function aggregate(
   records: SessionRecord[],
   events?: CostEvent[],
   opts: AggregateOptions = {},
+  editEvents?: EditEvent[],
 ): CostAggregate {
   // Infer default since when bucketing is requested without explicit --since.
   let effectiveSince: Date | undefined = opts.since;
@@ -380,12 +412,13 @@ export function aggregate(
     }
   }
 
-  // Slow path is needed when we have any filtering, bucketing, tokens, or
-  // grouping that requires event data or filtered record sets.
+  // Slow path is needed when we have any filtering, bucketing, tokens, loc,
+  // or grouping that requires event data or filtered record sets.
   const hasSlowPath =
     effectiveSince !== undefined ||
     opts.bucket !== undefined ||
     opts.tokens === true ||
+    opts.loc === true ||
     opts.by !== undefined ||
     opts.dir !== undefined ||
     opts.interactive !== undefined;
@@ -424,7 +457,8 @@ export function aggregate(
     dir: opts.dir,
     interactive: opts.interactive,
     min: opts.min,
-    minMetric: opts.tokens === true ? "tokens" : "cost",
+    minMetric:
+      opts.loc === true ? "loc" : opts.tokens === true ? "tokens" : "cost",
   };
 
   const filtered = applyFilters(records, filterOpts);
@@ -457,6 +491,62 @@ export function aggregate(
       currency = r.costCurrency;
       break;
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // Special case: --by language (non-bucketed)
+  //
+  // Unlike dir/session/model/agent, a single session contributes to many
+  // language groups (one per file extension touched). Fan out per record
+  // across its locByLanguage map. The bucketed variant is handled later in
+  // the bucketed-LOC branch.
+  // -----------------------------------------------------------------------
+  if (opts.by === "language" && opts.bucket === undefined) {
+    const groupsMap = new Map<string, { added: number; removed: number; sessions: Set<string> }>();
+    const uniqueSessions = new Set<string>();
+    for (const r of filtered) {
+      const map = r.locByLanguage;
+      if (map === undefined) continue;
+      let touched = false;
+      for (const lang of Object.keys(map)) {
+        const v = map[lang];
+        if (v === undefined) continue;
+        let g = groupsMap.get(lang);
+        if (g === undefined) {
+          g = { added: 0, removed: 0, sessions: new Set() };
+          groupsMap.set(lang, g);
+        }
+        g.added += v.added;
+        g.removed += v.removed;
+        if (v.added > 0 || v.removed > 0) {
+          g.sessions.add(r.sessionId);
+          touched = true;
+        }
+      }
+      if (touched) {
+        uniqueSessions.add(r.sessionId);
+      }
+    }
+    const groups: Group<AggregateRow>[] = [];
+    // Stash the unique-session count on a sentinel "_total" row that the
+    // renderer pulls out for the headline. Other consumers (json) see it
+    // alongside the language rows; harmless.
+    for (const [lang, g] of groupsMap) {
+      const row: AggregateRow = {
+        label: lang,
+        costAmount: 0,
+        sessionCount: g.sessions.size,
+        linesAdded: g.added,
+        linesRemoved: g.removed,
+      };
+      groups.push({ label: lang, items: [row] });
+    }
+    return {
+      kind: "grouped",
+      groups,
+      currency,
+      totalSessions: uniqueSessions.size,
+    };
   }
 
   // Grouping key function.
@@ -581,6 +671,24 @@ export function aggregate(
       row.cacheWriteTokens = totalCacheWriteTokens;
     }
 
+    if (opts.loc === true) {
+      let added = 0;
+      let removed = 0;
+      for (const r of filtered) {
+        const map = r.locByLanguage;
+        if (map === undefined) continue;
+        for (const lang of Object.keys(map)) {
+          const v = map[lang];
+          if (v !== undefined) {
+            added += v.added;
+            removed += v.removed;
+          }
+        }
+      }
+      row.linesAdded = added;
+      row.linesRemoved = removed;
+    }
+
     return { kind: "total", row, currency };
   }
 
@@ -605,6 +713,20 @@ export function aggregate(
       if (opts.tokens === true) {
         if (grp.rows.inputTokens === undefined) grp.rows.inputTokens = 0;
         grp.rows.inputTokens += r.contextTokens;
+      }
+      if (opts.loc === true) {
+        const map = r.locByLanguage;
+        if (map !== undefined) {
+          if (grp.rows.linesAdded === undefined) grp.rows.linesAdded = 0;
+          if (grp.rows.linesRemoved === undefined) grp.rows.linesRemoved = 0;
+          for (const lang of Object.keys(map)) {
+            const v = map[lang];
+            if (v !== undefined) {
+              grp.rows.linesAdded += v.added;
+              grp.rows.linesRemoved += v.removed;
+            }
+          }
+        }
       }
 
       // Sum deltas and tokens from events when available.
@@ -726,6 +848,120 @@ export function aggregate(
 
 
   // -----------------------------------------------------------------------
+  // Bucketed-LOC fast-forward.
+  //
+  // EditEvents already carry per-edit deltas (no cumulative baseline like
+  // cost), so the bucketing logic is simpler than the cost path. We also
+  // support fanning out per language when --by language is set.
+  // -----------------------------------------------------------------------
+  if (opts.loc === true && opts.bucket !== undefined) {
+    const sessionIdSet = new Set<string>();
+    for (const r of filtered) {
+      sessionIdSet.add(r.sessionId);
+    }
+    const recordById = new Map<string, SessionRecord>();
+    for (const r of filtered) {
+      recordById.set(r.sessionId, r);
+    }
+
+    type BucketEx = TimeBucket & { _sessions?: Set<string> };
+    const ensureBucket = (
+      m: Map<string, TimeBucket>,
+      bk: string,
+    ): BucketEx => {
+      let b = m.get(bk) as BucketEx | undefined;
+      if (b === undefined) {
+        b = { bucket: bk, costAmount: 0, deltaCost: 0, sessionCount: 0, linesAdded: 0, linesRemoved: 0 };
+        m.set(bk, b);
+      }
+      if ((b.linesAdded ?? undefined) === undefined) b.linesAdded = 0;
+      if ((b.linesRemoved ?? undefined) === undefined) b.linesRemoved = 0;
+      return b;
+    };
+
+    const accrueEdit = (b: BucketEx, ev: EditEvent): void => {
+      b.linesAdded = (b.linesAdded ?? 0) + ev.linesAdded;
+      b.linesRemoved = (b.linesRemoved ?? 0) + ev.linesRemoved;
+      if (b._sessions === undefined) b._sessions = new Set<string>();
+      b._sessions.add(ev.sessionId);
+      b.sessionCount = b._sessions.size;
+    };
+
+    const finalizeLoc = (b: BucketEx): void => {
+      delete b._sessions;
+    };
+
+    const eventsList = editEvents ?? [];
+
+    // --by language + --bucket → groups keyed by language, with sessionCount
+    // deduped within (language, bucket).
+    if (opts.by === "language") {
+      const groupsMap = new Map<string, { label: string; buckets: Map<string, TimeBucket> }>();
+      const uniqueSessions = new Set<string>();
+      for (const ev of eventsList) {
+        if (!sessionIdSet.has(ev.sessionId)) continue;
+        if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) continue;
+        let grp = groupsMap.get(ev.language);
+        if (grp === undefined) {
+          grp = { label: ev.language, buckets: new Map() };
+          groupsMap.set(ev.language, grp);
+        }
+        const bucket = ensureBucket(grp.buckets, bucketKey(ev.ts));
+        accrueEdit(bucket, ev);
+        uniqueSessions.add(ev.sessionId);
+      }
+      const groups: Group<TimeBucket>[] = [];
+      for (const grp of groupsMap.values()) {
+        const items = Array.from(grp.buckets.values());
+        for (const it of items) finalizeLoc(it as BucketEx);
+        items.sort((a, b) => a.bucket.localeCompare(b.bucket));
+        if (items.length > 0) groups.push({ label: grp.label, items });
+      }
+      return { kind: "timeSeriesGrouped", groups, currency, totalSessions: uniqueSessions.size };
+    }
+
+    // --by dir|session|model|agent + --bucket → groups keyed by record dim.
+    if (opts.by !== undefined) {
+      const groupsMap = new Map<string, { label: string; buckets: Map<string, TimeBucket> }>();
+      for (const ev of eventsList) {
+        if (!sessionIdSet.has(ev.sessionId)) continue;
+        if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) continue;
+        const r = recordById.get(ev.sessionId);
+        if (r === undefined) continue;
+        const key = groupKey(r);
+        let grp = groupsMap.get(key);
+        if (grp === undefined) {
+          grp = { label: key, buckets: new Map() };
+          groupsMap.set(key, grp);
+        }
+        const bucket = ensureBucket(grp.buckets, bucketKey(ev.ts));
+        accrueEdit(bucket, ev);
+      }
+      const groups: Group<TimeBucket>[] = [];
+      for (const grp of groupsMap.values()) {
+        const items = Array.from(grp.buckets.values());
+        for (const it of items) finalizeLoc(it as BucketEx);
+        items.sort((a, b) => a.bucket.localeCompare(b.bucket));
+        if (items.length > 0) groups.push({ label: grp.label, items });
+      }
+      return { kind: "timeSeriesGrouped", groups, currency };
+    }
+
+    // Plain --bucket, no grouping.
+    const bucketsMap = new Map<string, TimeBucket>();
+    for (const ev of eventsList) {
+      if (!sessionIdSet.has(ev.sessionId)) continue;
+      if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) continue;
+      const bucket = ensureBucket(bucketsMap, bucketKey(ev.ts));
+      accrueEdit(bucket, ev);
+    }
+    const timeSeries: TimeBucket[] = Array.from(bucketsMap.values());
+    for (const it of timeSeries) finalizeLoc(it as BucketEx);
+    timeSeries.sort((a, b) => a.bucket.localeCompare(b.bucket));
+    return { kind: "timeSeries", timeSeries, currency };
+  }
+
+  // -----------------------------------------------------------------------
   // Case 3: Bucketing with grouping (--by + --bucket)
   // -----------------------------------------------------------------------
   if (opts.by !== undefined && opts.bucket !== undefined) {
@@ -747,13 +983,16 @@ export function aggregate(
         continue;
       }
       const groupBuckets = getGroupBuckets(r);
+      const first = sessionEvents[0];
+      if (first === undefined) continue;
       // The first event's cumulative is a baseline, not a delta — we
       // don't know how that spend was distributed in time. Sessions
       // that pre-existed T1's per-turn recording would otherwise dump
       // a huge "pre-recording" lump into the first event's bucket.
-      let prev = sessionEvents[0].cumulativeCost;
+      let prev = first.cumulativeCost;
       for (let i = 1; i < sessionEvents.length; i++) {
         const ev = sessionEvents[i];
+        if (ev === undefined) continue;
         const delta = Math.max(0, ev.cumulativeCost - prev);
         prev = ev.cumulativeCost;
         if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) {
@@ -788,11 +1027,14 @@ export function aggregate(
     if (sessionEvents === undefined || sessionEvents.length === 0) {
       continue;
     }
+    const first = sessionEvents[0];
+    if (first === undefined) continue;
     // First event's cumulative is the baseline; deltas start at #2.
     // See comment in case 3 above for rationale.
-    let prev = sessionEvents[0].cumulativeCost;
+    let prev = first.cumulativeCost;
     for (let i = 1; i < sessionEvents.length; i++) {
       const ev = sessionEvents[i];
+      if (ev === undefined) continue;
       const delta = Math.max(0, ev.cumulativeCost - prev);
       prev = ev.cumulativeCost;
       if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) {

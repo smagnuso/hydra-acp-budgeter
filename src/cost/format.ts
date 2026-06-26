@@ -10,6 +10,9 @@ export interface RenderOptions {
   histogram?: boolean;
   /** When true, bars and values use tokens instead of $. Default: false. */
   tokens?: boolean;
+  /** When true, bars and values use net lines of code (added − removed)
+   * instead of $ or tokens. Mutually exclusive with `tokens`. */
+  loc?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -134,44 +137,61 @@ export function renderText(agg: CostAggregate, opts: RenderOptions = {}): string
   const terminalWidth = process.stdout.columns ?? 80;
   const showHistogram = opts.histogram === true;
   const useTokens = opts.tokens === true;
+  const useLoc = opts.loc === true;
 
-  // Build headline
   let out = "";
 
   const sessionsScope = (n: number): string => {
     return `${n} session${n === 1 ? "" : "s"}`;
   };
 
+  const headlineTotal = (cost: number, rowsForLoc: (AggregateRow | TimeBucket)[]): string => {
+    if (useLoc) {
+      let net = 0;
+      for (const it of rowsForLoc) {
+        net += netLoc(it);
+      }
+      return `${formatLoc(net)} lines`;
+    }
+    return formatCost(cost);
+  };
+
   if (agg.kind === "total") {
-    const totalStr = formatCost(agg.row.costAmount);
     const n = agg.row.sessionCount;
     const scope = n !== undefined ? sessionsScope(n) : (agg.row.label ?? "all sessions");
-    out += `Total: ${totalStr} across ${scope}\n`;
+    out += `Total: ${headlineTotal(agg.row.costAmount, [agg.row])} across ${scope}\n`;
   } else if (agg.kind === "grouped") {
-    const totalCost = sumGroupCosts(agg.groups);
-    const totalStr = formatCost(totalCost);
+    const flatItems: AggregateRow[] = [];
     let n = 0;
     for (const g of agg.groups) {
       for (const it of g.items) {
+        flatItems.push(it);
         n += it.sessionCount ?? 0;
       }
     }
-    out += `Total: ${totalStr} across ${sessionsScope(n)}\n`;
+    if (agg.totalSessions !== undefined) {
+      n = agg.totalSessions;
+    }
+    const totalCost = sumGroupCosts(agg.groups);
+    out += `Total: ${headlineTotal(totalCost, flatItems)} across ${sessionsScope(n)}\n`;
   } else if (agg.kind === "timeSeries") {
     const totalCost = agg.timeSeries.reduce((s, b) => s + b.costAmount, 0);
-    const totalStr = formatCost(totalCost);
     const n = agg.timeSeries.reduce((s, b) => s + (b.sessionCount ?? 0), 0);
-    out += `Total: ${totalStr} across ${sessionsScope(n)}\n`;
+    out += `Total: ${headlineTotal(totalCost, agg.timeSeries)} across ${sessionsScope(n)}\n`;
   } else if (agg.kind === "timeSeriesGrouped") {
-    const totalCost = sumGroupCosts(agg.groups);
-    const totalStr = formatCost(totalCost);
+    const flatItems: TimeBucket[] = [];
     let n = 0;
     for (const g of agg.groups) {
       for (const it of g.items) {
+        flatItems.push(it);
         n += it.sessionCount ?? 0;
       }
     }
-    out += `Total: ${totalStr} across ${sessionsScope(n)}\n`;
+    if (agg.totalSessions !== undefined) {
+      n = agg.totalSessions;
+    }
+    const totalCost = sumGroupCosts(agg.groups);
+    out += `Total: ${headlineTotal(totalCost, flatItems)} across ${sessionsScope(n)}\n`;
   }
 
 
@@ -193,15 +213,15 @@ export function renderText(agg: CostAggregate, opts: RenderOptions = {}): string
       }
 
       flattened.sort((a, b) => {
-        const av = useTokens ? tokenSum(a) : a.costAmount;
-        const bv = useTokens ? tokenSum(b) : b.costAmount;
+        const av = valueOf(a, useTokens, useLoc);
+        const bv = valueOf(b, useTokens, useLoc);
         return bv - av;
       });
 
       if (showHistogram) {
-        out += renderGroupHistogram(flattened, terminalWidth, useTokens);
+        out += renderGroupHistogram(flattened, terminalWidth, useTokens, useLoc);
       } else {
-        out += renderFlatGroupedList(flattened, useTokens);
+        out += renderFlatGroupedList(flattened, useTokens, useLoc);
       }
     } else {
       for (const group of agg.groups) {
@@ -210,9 +230,9 @@ export function renderText(agg: CostAggregate, opts: RenderOptions = {}): string
         const hasTokenData = rows.some((r) => r.inputTokens !== undefined || r.outputTokens !== undefined);
 
         if (showHistogram) {
-          out += renderGroupHistogram(rows, terminalWidth, useTokens);
+          out += renderGroupHistogram(rows, terminalWidth, useTokens, useLoc);
         } else {
-          out += renderTableRows(rows, hasTokenData, useTokens);
+          out += renderTableRows(rows, hasTokenData, useTokens, useLoc);
         }
       }
     }
@@ -220,9 +240,9 @@ export function renderText(agg: CostAggregate, opts: RenderOptions = {}): string
     const hasTokenData = agg.timeSeries.some((b) => b.inputTokens !== undefined || b.outputTokens !== undefined);
 
     if (showHistogram) {
-      out += renderGroupHistogram(agg.timeSeries, terminalWidth, useTokens);
+      out += renderGroupHistogram(agg.timeSeries, terminalWidth, useTokens, useLoc);
     } else {
-      out += renderTableRows(agg.timeSeries, hasTokenData, useTokens);
+      out += renderTableRows(agg.timeSeries, hasTokenData, useTokens, useLoc);
     }
   } else if (agg.kind === "timeSeriesGrouped") {
     for (const group of agg.groups) {
@@ -230,9 +250,9 @@ export function renderText(agg: CostAggregate, opts: RenderOptions = {}): string
       const hasTokenData = group.items.some((b) => b.inputTokens !== undefined || b.outputTokens !== undefined);
 
       if (showHistogram) {
-        out += renderGroupHistogram(group.items, terminalWidth, useTokens);
+        out += renderGroupHistogram(group.items, terminalWidth, useTokens, useLoc);
       } else {
-        out += renderTableRows(group.items, hasTokenData, useTokens);
+        out += renderTableRows(group.items, hasTokenData, useTokens, useLoc);
       }
     }
   }
@@ -245,9 +265,22 @@ export function renderText(agg: CostAggregate, opts: RenderOptions = {}): string
 // ---------------------------------------------------------------------------
 
 // Flat one-line-per-group rendering: `  label    $cost    N sessions`
+function valueOf(item: AggregateRow | TimeBucket, useTokens: boolean, useLoc: boolean): number {
+  if (useLoc) return netLoc(item);
+  if (useTokens) return tokenSum(item);
+  return item.costAmount;
+}
+
+function formatValue(item: AggregateRow | TimeBucket, useTokens: boolean, useLoc: boolean): string {
+  if (useLoc) return formatLoc(netLoc(item));
+  if (useTokens) return humanizeTokens(tokenSum(item));
+  return formatCost(item.costAmount);
+}
+
 function renderFlatGroupedList(
   rows: AggregateRow[],
   useTokens: boolean,
+  useLoc: boolean,
 ): string {
   if (rows.length === 0) {
     return "  (no data)\n";
@@ -260,9 +293,7 @@ function renderFlatGroupedList(
     }
   }
 
-  const valueStrs = rows.map((r) => {
-    return useTokens ? humanizeTokens(tokenSum(r)) : formatCost(r.costAmount);
-  });
+  const valueStrs = rows.map((r) => formatValue(r, useTokens, useLoc));
 
   let maxValueLen = 0;
   for (const s of valueStrs) {
@@ -282,7 +313,8 @@ function renderFlatGroupedList(
     if (r === undefined) {
       continue;
     }
-    let line = `  ${r.label.padEnd(maxLabelLen)}  ${valueStrs[i].padStart(maxValueLen)}`;
+    const valueStr = valueStrs[i] ?? "";
+    let line = `  ${r.label.padEnd(maxLabelLen)}  ${valueStr.padStart(maxValueLen)}`;
     if (countWidth > 0) {
       line += `  ${countStrs[i]}`;
     }
@@ -296,12 +328,12 @@ function renderGroupHistogram(
   items: (AggregateRow | TimeBucket)[],
   terminalWidth: number,
   useTokens: boolean,
+  useLoc: boolean,
 ): string {
   if (items.length === 0) {
     return "  (no data)\n";
   }
 
-  // Find max label length for column alignment
   let maxLabelLen = 0;
 
   for (const item of items) {
@@ -311,13 +343,14 @@ function renderGroupHistogram(
     }
   }
 
+  // For LOC bars we use absolute net (net removals show as bars too, but
+  // sign is preserved in the text column). For cost/tokens, raw value.
   const values = items.map((item) => {
-    return useTokens ? tokenSum(item) : item.costAmount;
+    const v = valueOf(item, useTokens, useLoc);
+    return useLoc ? Math.abs(v) : v;
   });
 
-  const valueStrs = values.map((v) => {
-    return useTokens ? humanizeTokens(v) : formatCost(v);
-  });
+  const valueStrs = items.map((item) => formatValue(item, useTokens, useLoc));
 
   let maxValueLen = 0;
   for (const s of valueStrs) {
@@ -350,8 +383,8 @@ function renderGroupHistogram(
     }
 
     const label = getItemLabel(item).padEnd(maxLabelLen);
-    const value = valueStrs[i].padStart(maxValueLen);
-    let line = `  ${label}  ${value}  ${bars[i]}`;
+    const value = (valueStrs[i] ?? "").padStart(maxValueLen);
+    let line = `  ${label}  ${value}  ${bars[i] ?? ""}`;
     if (countWidth > 0) {
       line += `  ${countStrs[i]}`;
     }
@@ -369,12 +402,12 @@ function renderTableRows(
   items: (AggregateRow | TimeBucket)[],
   hasTokenData: boolean,
   useTokens: boolean,
+  useLoc: boolean,
 ): string {
   if (items.length === 0) {
     return "  (no data)\n";
   }
 
-  // Compute max label length for column alignment
   let maxLabelLen = 28;
 
   for (const item of items) {
@@ -384,12 +417,13 @@ function renderTableRows(
     }
   }
 
-  // Header
   let out = "  ";
   out += padRight("Label", maxLabelLen);
   out += "  ";
 
-  if (useTokens) {
+  if (useLoc) {
+    out += "    +Added   -Removed     Net";
+  } else if (useTokens) {
     out += "       Tokens";
   } else {
     out += "      Cost";
@@ -400,14 +434,21 @@ function renderTableRows(
 
   out += "\n";
 
-  // Data rows
   for (const item of items) {
     const label = getItemLabel(item).padEnd(maxLabelLen);
     let line = "  ";
     line += label;
     line += "  ";
 
-    if (useTokens) {
+    if (useLoc) {
+      const added = item.linesAdded ?? 0;
+      const removed = item.linesRemoved ?? 0;
+      line += added.toLocaleString().padStart(10);
+      line += "  ";
+      line += removed.toLocaleString().padStart(8);
+      line += "  ";
+      line += formatLoc(added - removed).padStart(8);
+    } else if (useTokens) {
       const tokens = tokenSum(item);
       line += humanizeTokens(tokens).padStart(12);
     } else {
@@ -505,6 +546,18 @@ function serializeRow(row: AggregateRow): Record<string, unknown> {
     obj.cacheWriteTokens = row.cacheWriteTokens;
   }
 
+  if (row.linesAdded !== undefined) {
+    obj.linesAdded = row.linesAdded;
+  }
+
+  if (row.linesRemoved !== undefined) {
+    obj.linesRemoved = row.linesRemoved;
+  }
+
+  if (row.linesAdded !== undefined || row.linesRemoved !== undefined) {
+    obj.linesNet = (row.linesAdded ?? 0) - (row.linesRemoved ?? 0);
+  }
+
   return obj;
 }
 
@@ -531,6 +584,18 @@ function serializeBucket(bucket: TimeBucket): Record<string, unknown> {
     obj.cacheWriteTokens = bucket.cacheWriteTokens;
   }
 
+  if (bucket.linesAdded !== undefined) {
+    obj.linesAdded = bucket.linesAdded;
+  }
+
+  if (bucket.linesRemoved !== undefined) {
+    obj.linesRemoved = bucket.linesRemoved;
+  }
+
+  if (bucket.linesAdded !== undefined || bucket.linesRemoved !== undefined) {
+    obj.linesNet = (bucket.linesAdded ?? 0) - (bucket.linesRemoved ?? 0);
+  }
+
   return obj;
 }
 
@@ -540,6 +605,17 @@ function serializeBucket(bucket: TimeBucket): Record<string, unknown> {
 
 function formatCost(amount: number): string {
   return `$${amount.toFixed(2)}`;
+}
+
+function netLoc(row: AggregateRow | TimeBucket): number {
+  const added = row.linesAdded ?? 0;
+  const removed = row.linesRemoved ?? 0;
+  return added - removed;
+}
+
+function formatLoc(n: number): string {
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${n.toLocaleString()}`;
 }
 
 function tokenSum(row: AggregateRow | TimeBucket): number {

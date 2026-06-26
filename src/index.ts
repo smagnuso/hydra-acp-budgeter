@@ -8,10 +8,10 @@ import { stateFilePath } from "./paths.js";
 import { DEFAULT_RULE } from "./rule.js";
 import { deleteStateFile } from "./tracker.js";
 import { logger, setDebug } from "./util/log.js";
-import { scanSessions } from "./cost/session-store.js";
+import { scanSessions, enrichSessionsWithLoc } from "./cost/session-store.js";
 import { listSessionsFromDaemon, fetchUsageEventsFromDaemon } from "./cost/daemon-client.js";
-import { streamHistoryEvents } from "./cost/history-stream.js";
-import type { CostEvent } from "./cost/history-stream.js";
+import { streamHistoryEvents, streamHistoryEditEvents } from "./cost/history-stream.js";
+import type { CostEvent, EditEvent } from "./cost/history-stream.js";
 import { aggregate, applyFilters, parseSince } from "./cost/aggregate.js";
 import { renderText, renderJson } from "./cost/format.js";
 
@@ -39,7 +39,7 @@ const COST_HELP = `Usage: hydra budgeter usage [OPTIONS]
 Options:
   --since <date|duration>  Only include sessions updated after this date (e.g. 7d, 2024-01-01)
   --bucket <hour|day|week|month>  Group results into time buckets (implies --since 24h/30d/6m/2y)
-  --by <dir|session|model|agent>  Group by dimension
+  --by <dir|session|model|agent|language>  Group by dimension (language requires --metric loc)
   --depth <N>              Depth for --by dir grouping (default: 1)
   --dir <path>             Only include sessions under this directory prefix
   --interactive            Only include interactive sessions (default: include both)
@@ -49,7 +49,8 @@ Options:
                            that host.
   --min <N>                Drop sessions whose active-metric value is <= N (default: 0)
   --histogram              Show an ASCII histogram bar next to each row (implies --bucket week if no bucket given)
-  --metric <cost|tokens>   Display metric (default: cost)
+  --metric <cost|tokens|loc>  Display metric (default: cost). "loc" counts net lines of code
+                              from Edit/Write tool diffs in session history.
   --json                   Output as JSON
   --help                   Show this help message`;
 
@@ -116,9 +117,15 @@ async function runCost(argv: string[]): Promise<void> {
         }
     }
 
-    if (metric !== undefined && metric !== "cost" && metric !== "tokens") {
-        const err = new Error("Invalid --metric value. Must be 'cost' or 'tokens'.\nRun \"hydra budgeter usage --help\" for usage.");
+    if (metric !== undefined && metric !== "cost" && metric !== "tokens" && metric !== "loc") {
+        const err = new Error("Invalid --metric value. Must be 'cost', 'tokens', or 'loc'.\nRun \"hydra budgeter usage --help\" for usage.");
         throw err;
+    }
+
+    const useLoc = metric === "loc";
+
+    if (by === "language" && !useLoc) {
+        throw new Error("--by language requires --metric loc.\nRun \"hydra budgeter usage --help\" for usage.");
     }
 
     let parsedSince: Date | undefined;
@@ -168,12 +175,20 @@ async function runCost(argv: string[]): Promise<void> {
 
     const allRecords =
     (await listSessionsFromDaemon()) ?? scanSessions();
+
+    // LOC totals aren't carried by meta.json or the daemon's session list —
+    // stream history.jsonl for each survivor to populate locByLanguage.
+    // Done before filtering so a --min on loc has data to compare against.
+    if (useLoc || by === "language") {
+        await enrichSessionsWithLoc(allRecords);
+    }
+
     const records = applyFilters(allRecords, {
         since: effectiveSince,
         dir,
         interactive: interactiveOpt,
         min: minVal,
-        minMetric: useTokens ? "tokens" : "cost",
+        minMetric: useLoc ? "loc" : useTokens ? "tokens" : "cost",
         host: host ?? "local",
     });
 
@@ -203,25 +218,38 @@ async function runCost(argv: string[]): Promise<void> {
         }
     }
 
+    // For time-bucketed LOC views, stream EditEvents (with timestamps) for
+    // the survivor set. Non-bucketed LOC views use the locByLanguage totals
+    // that enrichSessionsWithLoc already populated, so no streaming here.
+    let editEvents: EditEvent[] | undefined = undefined;
+    if (useLoc && bucket !== undefined) {
+        const list: EditEvent[] = [];
+        for await (const ev of streamHistoryEditEvents(records)) {
+            list.push(ev);
+        }
+        editEvents = list;
+    }
+
     const depth = depthStr !== undefined ? parseInt(depthStr, 10) : undefined;
 
     const opts = {
-        by: by as "dir" | "session" | "model" | "agent" | undefined,
+        by: by as "dir" | "session" | "model" | "agent" | "language" | undefined,
         depth,
         bucket: bucket as "day" | "week" | "month" | undefined,
         since: effectiveSince,
         interactive: interactiveOpt,
         dir,
         tokens: useTokens,
+        loc: useLoc,
         min: minVal,
     };
 
-    const agg = aggregate(records, events, opts);
+    const agg = aggregate(records, events, opts, editEvents);
 
     if (json) {
         process.stdout.write(renderJson(agg) + "\n");
     } else {
-        const text = renderText(agg, { histogram, tokens: metric === "tokens" });
+        const text = renderText(agg, { histogram, tokens: useTokens, loc: useLoc });
         process.stdout.write(text);
     }
 }

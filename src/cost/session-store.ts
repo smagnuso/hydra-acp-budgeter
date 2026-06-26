@@ -50,6 +50,10 @@ export interface SessionRecord {
    * user has attached to it here). Used together with importedFromMachine
    * to distinguish "local working copy of an import" from a passive mirror. */
   upstreamSessionId?: string;
+  /** Per-language line-count totals derived from Edit/Write tool diffs in
+   * history.jsonl. Populated lazily by enrichSessionsWithLoc(); undefined
+   * means "not yet computed" (treated as zeros by aggregate). */
+  locByLanguage?: Record<string, { added: number; removed: number }>;
 }
 
 function readMetaJson(sessionPath: string): SessionRecord | undefined {
@@ -141,6 +145,30 @@ function readMetaJson(sessionPath: string): SessionRecord | undefined {
     importedFromMachine,
     upstreamSessionId,
   };
+}
+
+/**
+ * Populate `locByLanguage` on each record by streaming its history.jsonl
+ * for Edit/Write diff payloads. In-place mutation; returns the same array
+ * for chaining. Records whose history.jsonl is missing/empty get an empty
+ * `locByLanguage` map (not undefined) so callers can distinguish
+ * "computed, nothing found" from "not yet computed".
+ */
+export async function enrichSessionsWithLoc(
+  records: SessionRecord[],
+): Promise<SessionRecord[]> {
+  const { streamHistoryEditEvents } = await import("./history-stream.js");
+  for (const r of records) {
+    const map: Record<string, { added: number; removed: number }> = {};
+    for await (const ev of streamHistoryEditEvents(r)) {
+      const cur = map[ev.language] ?? { added: 0, removed: 0 };
+      cur.added += ev.linesAdded;
+      cur.removed += ev.linesRemoved;
+      map[ev.language] = cur;
+    }
+    r.locByLanguage = map;
+  }
+  return records;
 }
 
 /** Scan the sessions directory and return a typed SessionRecord[] for every valid meta.json found. */
