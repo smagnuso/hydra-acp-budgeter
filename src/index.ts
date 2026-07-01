@@ -48,7 +48,7 @@ Options:
                            every session; <name> shows passive mirrors imported from
                            that host.
   --min <N>                Drop sessions whose active-metric value is <= N (default: 0)
-  --histogram              Show an ASCII histogram bar next to each row (implies --bucket week if no bucket given)
+  --histogram              Show an ASCII histogram bar next to each row (implies --bucket hour if no bucket given)
   --metric <cost|tokens|loc>  Display metric (default: cost). "loc" counts net lines of code
                               from Edit/Write tool diffs in session history.
   --json                   Output as JSON
@@ -146,12 +146,11 @@ async function runCost(argv: string[]): Promise<void> {
     }
 
     if (argv.length === 0) {
-        bucket = "hour";
         histogram = true;
     }
 
     if (histogram && bucket === undefined) {
-        bucket = "week";
+        bucket = "hour";
     }
 
     let effectiveSince: Date | undefined = parsedSince;
