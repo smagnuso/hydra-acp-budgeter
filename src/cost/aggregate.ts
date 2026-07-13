@@ -949,16 +949,18 @@ export function aggregate(
 
     // Plain --bucket, no grouping.
     const bucketsMap = new Map<string, TimeBucket>();
+    const uniqueSessions = new Set<string>();
     for (const ev of eventsList) {
       if (!sessionIdSet.has(ev.sessionId)) continue;
       if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) continue;
       const bucket = ensureBucket(bucketsMap, bucketKey(ev.ts));
       accrueEdit(bucket, ev);
+      uniqueSessions.add(ev.sessionId);
     }
     const timeSeries: TimeBucket[] = Array.from(bucketsMap.values());
     for (const it of timeSeries) finalizeLoc(it as BucketEx);
     timeSeries.sort((a, b) => a.bucket.localeCompare(b.bucket));
-    return { kind: "timeSeries", timeSeries, currency };
+    return { kind: "timeSeries", timeSeries, currency, totalSessions: uniqueSessions.size };
   }
 
   // -----------------------------------------------------------------------
@@ -1022,6 +1024,7 @@ export function aggregate(
   // -----------------------------------------------------------------------
   const bucketsMap = new Map<string, TimeBucket>();
 
+  const uniqueSessions = new Set<string>();
   for (const r of filtered) {
     const sessionEvents = eventsBySession.get(r.sessionId);
     if (sessionEvents === undefined || sessionEvents.length === 0) {
@@ -1032,6 +1035,7 @@ export function aggregate(
     // First event's cumulative is the baseline; deltas start at #2.
     // See comment in case 3 above for rationale.
     let prev = first.cumulativeCost;
+    let contributed = false;
     for (let i = 1; i < sessionEvents.length; i++) {
       const ev = sessionEvents[i];
       if (ev === undefined) continue;
@@ -1041,6 +1045,10 @@ export function aggregate(
         continue;
       }
       accrueEvent(bucketsMap, ev, delta);
+      contributed = true;
+    }
+    if (contributed) {
+      uniqueSessions.add(r.sessionId);
     }
   }
 
@@ -1050,5 +1058,5 @@ export function aggregate(
   }
   timeSeries.sort((a, b) => a.bucket.localeCompare(b.bucket));
 
-  return { kind: "timeSeries", timeSeries, currency };
+  return { kind: "timeSeries", timeSeries, currency, totalSessions: uniqueSessions.size };
 }

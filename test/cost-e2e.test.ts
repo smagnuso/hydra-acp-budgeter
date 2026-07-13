@@ -53,7 +53,17 @@ afterEach(() => {
 async function runCost(args: string[]): Promise<{ stdout: string; stderr: string }> {
   const distPath = resolve(process.cwd(), "dist", "index.js");
   const env = { ...process.env, HYDRA_ACP_HOME: _tempBase! };
-  return execFileAsync("node", [distPath, "cost", ...args], { env, timeout: 10000 });
+  // Fixtures use timestamps months old and expect a flat totals view.
+  // The CLI now defaults to an hourly 24h histogram, so widen the window
+  // to all-time and turn off histogram unless the caller opted in.
+  const hasSince = args.some((a) => a === "--since" || a.startsWith("--since="));
+  const hasHistogramFlag = args.some((a) => a === "--histogram" || a === "--no-histogram" || a === "--bucket");
+  const finalArgs = [
+    ...(hasSince ? [] : ["--since", "10y"]),
+    ...(hasHistogramFlag ? [] : ["--no-histogram"]),
+    ...args,
+  ];
+  return execFileAsync("node", [distPath, "cost", ...finalArgs], { env, timeout: 10000 });
 }
 
 test("cost subcommand: text output shows total cost from meta.json", async () => {

@@ -13,6 +13,12 @@ export interface RenderOptions {
   /** When true, bars and values use net lines of code (added − removed)
    * instead of $ or tokens. Mutually exclusive with `tokens`. */
   loc?: boolean;
+  /** Human-readable description of the time window the aggregate covers
+   * (e.g. "last 24 hours", "since 2025-01-01", "all time"). When set,
+   * rendered as a "Window: ..." line beneath the headline so users can
+   * tell at a glance whether they're looking at a bounded or all-time
+   * view. */
+  windowLabel?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -176,7 +182,9 @@ export function renderText(agg: CostAggregate, opts: RenderOptions = {}): string
     out += `Total: ${headlineTotal(totalCost, flatItems)} across ${sessionsScope(n)}\n`;
   } else if (agg.kind === "timeSeries") {
     const totalCost = agg.timeSeries.reduce((s, b) => s + b.costAmount, 0);
-    const n = agg.timeSeries.reduce((s, b) => s + (b.sessionCount ?? 0), 0);
+    // Prefer aggregate-level unique session count when available — summing
+    // per-bucket counts double-counts sessions that span multiple buckets.
+    const n = agg.totalSessions ?? agg.timeSeries.reduce((s, b) => s + (b.sessionCount ?? 0), 0);
     out += `Total: ${headlineTotal(totalCost, agg.timeSeries)} across ${sessionsScope(n)}\n`;
   } else if (agg.kind === "timeSeriesGrouped") {
     const flatItems: TimeBucket[] = [];
@@ -192,6 +200,10 @@ export function renderText(agg: CostAggregate, opts: RenderOptions = {}): string
     }
     const totalCost = sumGroupCosts(agg.groups);
     out += `Total: ${headlineTotal(totalCost, flatItems)} across ${sessionsScope(n)}\n`;
+  }
+
+  if (opts.windowLabel !== undefined && opts.windowLabel.length > 0) {
+    out += `Window: ${opts.windowLabel}\n`;
   }
 
 

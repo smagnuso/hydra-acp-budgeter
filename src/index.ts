@@ -48,7 +48,8 @@ Options:
                            every session; <name> shows passive mirrors imported from
                            that host.
   --min <N>                Drop sessions whose active-metric value is <= N (default: 0)
-  --histogram              Show an ASCII histogram bar next to each row (implies --bucket hour if no bucket given)
+  --histogram              Show an ASCII histogram bar next to each row (default on; implies --bucket hour if no bucket given)
+  --no-histogram           Collapse to a single total row (also drops the default hourly bucket)
   --metric <cost|tokens|loc>  Display metric (default: cost). "loc" counts net lines of code
                               from Edit/Write tool diffs in session history.
   --json                   Output as JSON
@@ -60,17 +61,23 @@ async function runCost(argv: string[]): Promise<void> {
         return;
     }
 
+    // Defaults represent the bare `hydra budgeter` view: a 24h hourly
+    // histogram. Flags below override individual fields. --by suppresses
+    // histogram/bucket at resolution time (below) because grouping is
+    // orthogonal to time-slicing.
     let since: string | undefined;
-    let bucket: string | undefined;
+    let bucket: string | undefined = "hour";
     let by: string | undefined;
     let depthStr: string | undefined;
     let dir: string | undefined;
     let interactiveOnly = false;
     let minStr: string | undefined;
-    let histogram = false;
+    let histogram = true;
     let metric: string | undefined;
     let json = false;
     let host: string | undefined;
+    let bucketExplicit = false;
+    let histogramExplicit = false;
 
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
@@ -85,6 +92,7 @@ async function runCost(argv: string[]): Promise<void> {
         } else if (arg === "--bucket") {
             i += 1;
             bucket = argv[i];
+            bucketExplicit = true;
         } else if (arg === "--by") {
             i += 1;
             by = argv[i];
@@ -101,6 +109,10 @@ async function runCost(argv: string[]): Promise<void> {
             minStr = argv[i];
         } else if (arg === "--histogram") {
             histogram = true;
+            histogramExplicit = true;
+        } else if (arg === "--no-histogram") {
+            histogram = false;
+            histogramExplicit = true;
         } else if (arg === "--metric") {
             i += 1;
             metric = argv[i];
@@ -145,32 +157,46 @@ async function runCost(argv: string[]): Promise<void> {
         }
     }
 
-    if (argv.length === 0) {
-        histogram = true;
+    // --by is a grouping view, orthogonal to time-bucketing. If the user
+    // didn't explicitly ask for a bucket or histogram, drop both — we'll
+    // render a flat grouped table instead of a grouped time-series.
+    if (by !== undefined) {
+        if (!bucketExplicit) {
+            bucket = undefined;
+        }
+        if (!histogramExplicit) {
+            histogram = false;
+        }
     }
 
-    if (histogram && bucket === undefined) {
-        bucket = "hour";
+    // Histogram and time-bucketing move together: turning off the histogram
+    // (--no-histogram) drops the default hourly bucket too, so the view
+    // collapses to a single total row instead of a time-series with no bars.
+    if (!histogram && !bucketExplicit) {
+        bucket = undefined;
     }
 
-    let effectiveSince: Date | undefined = parsedSince;
+    // Resolve the window. Explicit --since wins; otherwise the bucket
+    // (default "hour" for the histogram view, undefined for --by) picks a
+    // natural width; otherwise 24 hours. Applied uniformly so the
+    // "N sessions" scope is comparable across invocations that only differ
+    // by display flags.
+    let effectiveSince: Date;
 
-    if (effectiveSince === undefined && bucket !== undefined) {
+    if (parsedSince !== undefined) {
+        effectiveSince = parsedSince;
+    } else {
         const now = new Date();
-
-        if (bucket === "hour") {
-            now.setHours(now.getHours() - 24);
-            effectiveSince = now;
-        } else if (bucket === "day") {
+        if (bucket === "day") {
             now.setDate(now.getDate() - 30);
-            effectiveSince = now;
         } else if (bucket === "week") {
             now.setMonth(now.getMonth() - 6);
-            effectiveSince = now;
         } else if (bucket === "month") {
             now.setFullYear(now.getFullYear() - 2);
-            effectiveSince = now;
+        } else {
+            now.setHours(now.getHours() - 24);
         }
+        effectiveSince = now;
     }
 
     const interactiveOpt: boolean | undefined = interactiveOnly ? true : undefined;
@@ -250,12 +276,73 @@ async function runCost(argv: string[]): Promise<void> {
 
     const agg = aggregate(records, events, opts, editEvents);
 
+    const windowLabel = computeWindowLabel({
+        sinceRaw: since,
+        effectiveSince,
+        bucket,
+    });
+
     if (json) {
         process.stdout.write(renderJson(agg) + "\n");
     } else {
-        const text = renderText(agg, { histogram, tokens: useTokens, loc: useLoc });
+        const text = renderText(agg, { histogram, tokens: useTokens, loc: useLoc, windowLabel });
         process.stdout.write(text);
     }
+}
+
+function computeWindowLabel(args: {
+    sinceRaw: string | undefined;
+    effectiveSince: Date;
+    bucket: string | undefined;
+}): string {
+    if (args.sinceRaw !== undefined) {
+        const pretty = prettyRelative(args.sinceRaw);
+        return pretty !== undefined ? `last ${pretty}` : `since ${args.sinceRaw}`;
+    }
+    if (args.bucket === "day") return "last 30 days";
+    if (args.bucket === "week") return "last 6 months";
+    if (args.bucket === "month") return "last 2 years";
+    if (args.bucket === "hour") return "last 24 hours";
+    return "last 24 hours (default; pass --since to widen)";
+}
+
+// Turn a relative --since spec (7d, 24h, 2w, 90d, 18m, 10y) into a
+// natural-language phrase — rolling up smaller units into larger ones
+// when they land exactly on a boundary (24h → 1 day, 7d → 1 week,
+// 12m → 1 year), and leaving them as-is when they don't. Returns
+// undefined for ISO date strings — the caller falls back to the raw form.
+function prettyRelative(spec: string): string | undefined {
+    const m = spec.match(/^(\d+)\s*([dhmwy])$/i);
+    if (m === null) {
+        return undefined;
+    }
+    let amount = parseInt(m[1] ?? "0", 10);
+    let unit = (m[2] ?? "").toLowerCase();
+
+    if (unit === "h" && amount % 24 === 0) {
+        amount = amount / 24;
+        unit = "d";
+    }
+    if (unit === "d" && amount % 7 === 0 && amount < 30) {
+        amount = amount / 7;
+        unit = "w";
+    }
+    if (unit === "m" && amount % 12 === 0) {
+        amount = amount / 12;
+        unit = "y";
+    }
+
+    const word = ({
+        h: "hour",
+        d: "day",
+        w: "week",
+        m: "month",
+        y: "year",
+    } as Record<string, string>)[unit];
+    if (word === undefined) {
+        return undefined;
+    }
+    return `${amount} ${word}${amount === 1 ? "" : "s"}`;
 }
 
 async function runTransformer(): Promise<void> {
