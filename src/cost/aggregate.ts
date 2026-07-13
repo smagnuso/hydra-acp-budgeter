@@ -53,6 +53,10 @@ export interface TimeBucket {
 export interface Group<T> {
   label: string;
   items: T[];
+  /** Unique sessions contributing to this group across all its items. Set
+   * by the aggregator so headers can display "N sessions" without
+   * double-counting sessions that span multiple items/buckets. */
+  sessionCount?: number;
 }
 
 /**
@@ -539,7 +543,7 @@ export function aggregate(
         linesAdded: g.added,
         linesRemoved: g.removed,
       };
-      groups.push({ label: lang, items: [row] });
+      groups.push({ label: lang, items: [row], sessionCount: g.sessions.size });
     }
     return {
       kind: "grouped",
@@ -754,7 +758,7 @@ export function aggregate(
     const groups: Group<AggregateRow>[] = [];
 
     for (const grp of groupsMap.values()) {
-      groups.push({ label: grp.label, items: [grp.rows] });
+      groups.push({ label: grp.label, items: [grp.rows], sessionCount: grp.rows.sessionCount });
     }
 
     return { kind: "grouped", groups, currency };
@@ -896,18 +900,19 @@ export function aggregate(
     // --by language + --bucket → groups keyed by language, with sessionCount
     // deduped within (language, bucket).
     if (opts.by === "filetype") {
-      const groupsMap = new Map<string, { label: string; buckets: Map<string, TimeBucket> }>();
+      const groupsMap = new Map<string, { label: string; buckets: Map<string, TimeBucket>; sessions: Set<string> }>();
       const uniqueSessions = new Set<string>();
       for (const ev of eventsList) {
         if (!sessionIdSet.has(ev.sessionId)) continue;
         if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) continue;
         let grp = groupsMap.get(ev.filetype);
         if (grp === undefined) {
-          grp = { label: ev.filetype, buckets: new Map() };
+          grp = { label: ev.filetype, buckets: new Map(), sessions: new Set() };
           groupsMap.set(ev.filetype, grp);
         }
         const bucket = ensureBucket(grp.buckets, bucketKey(ev.ts));
         accrueEdit(bucket, ev);
+        grp.sessions.add(ev.sessionId);
         uniqueSessions.add(ev.sessionId);
       }
       const groups: Group<TimeBucket>[] = [];
@@ -915,14 +920,14 @@ export function aggregate(
         const items = Array.from(grp.buckets.values());
         for (const it of items) finalizeLoc(it as BucketEx);
         items.sort((a, b) => a.bucket.localeCompare(b.bucket));
-        if (items.length > 0) groups.push({ label: grp.label, items });
+        if (items.length > 0) groups.push({ label: grp.label, items, sessionCount: grp.sessions.size });
       }
       return { kind: "timeSeriesGrouped", groups, currency, totalSessions: uniqueSessions.size };
     }
 
     // --by dir|session|model|agent + --bucket → groups keyed by record dim.
     if (opts.by !== undefined) {
-      const groupsMap = new Map<string, { label: string; buckets: Map<string, TimeBucket> }>();
+      const groupsMap = new Map<string, { label: string; buckets: Map<string, TimeBucket>; sessions: Set<string> }>();
       for (const ev of eventsList) {
         if (!sessionIdSet.has(ev.sessionId)) continue;
         if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) continue;
@@ -931,18 +936,19 @@ export function aggregate(
         const key = groupKey(r);
         let grp = groupsMap.get(key);
         if (grp === undefined) {
-          grp = { label: key, buckets: new Map() };
+          grp = { label: key, buckets: new Map(), sessions: new Set() };
           groupsMap.set(key, grp);
         }
         const bucket = ensureBucket(grp.buckets, bucketKey(ev.ts));
         accrueEdit(bucket, ev);
+        grp.sessions.add(ev.sessionId);
       }
       const groups: Group<TimeBucket>[] = [];
       for (const grp of groupsMap.values()) {
         const items = Array.from(grp.buckets.values());
         for (const it of items) finalizeLoc(it as BucketEx);
         items.sort((a, b) => a.bucket.localeCompare(b.bucket));
-        if (items.length > 0) groups.push({ label: grp.label, items });
+        if (items.length > 0) groups.push({ label: grp.label, items, sessionCount: grp.sessions.size });
       }
       return { kind: "timeSeriesGrouped", groups, currency };
     }
@@ -967,16 +973,16 @@ export function aggregate(
   // Case 3: Bucketing with grouping (--by + --bucket)
   // -----------------------------------------------------------------------
   if (opts.by !== undefined && opts.bucket !== undefined) {
-    const groupsMap = new Map<string, { label: string; buckets: Map<string, TimeBucket> }>();
+    const groupsMap = new Map<string, { label: string; buckets: Map<string, TimeBucket>; sessions: Set<string> }>();
 
-    const getGroupBuckets = (r: SessionRecord): Map<string, TimeBucket> => {
+    const getGroup = (r: SessionRecord): { buckets: Map<string, TimeBucket>; sessions: Set<string> } => {
       const key = groupKey(r);
       let grp = groupsMap.get(key);
       if (grp === undefined) {
-        grp = { label: key, buckets: new Map() };
+        grp = { label: key, buckets: new Map(), sessions: new Set() };
         groupsMap.set(key, grp);
       }
-      return grp.buckets;
+      return grp;
     };
 
     for (const r of filtered) {
@@ -984,7 +990,9 @@ export function aggregate(
       if (sessionEvents === undefined || sessionEvents.length === 0) {
         continue;
       }
-      const groupBuckets = getGroupBuckets(r);
+      const grp = getGroup(r);
+      const groupBuckets = grp.buckets;
+      grp.sessions.add(r.sessionId);
       const first = sessionEvents[0];
       if (first === undefined) continue;
       // The first event's cumulative is a baseline, not a delta — we
@@ -1012,7 +1020,7 @@ export function aggregate(
       }
       items.sort((a, b) => a.bucket.localeCompare(b.bucket));
       if (items.length > 0) {
-        groups.push({ label: grp.label, items });
+        groups.push({ label: grp.label, items, sessionCount: grp.sessions.size });
       }
     }
 

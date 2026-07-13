@@ -237,7 +237,7 @@ export function renderText(agg: CostAggregate, opts: RenderOptions = {}): string
       }
     } else {
       for (const group of agg.groups) {
-        out += `\n${group.label}:\n`;
+        out += `\n${group.label}: ${summarizeGroup(group.items, group.sessionCount, useTokens, useLoc)}\n`;
         const rows = group.items;
         const hasTokenData = rows.some((r) => r.inputTokens !== undefined || r.outputTokens !== undefined);
 
@@ -258,7 +258,7 @@ export function renderText(agg: CostAggregate, opts: RenderOptions = {}): string
     }
   } else if (agg.kind === "timeSeriesGrouped") {
     for (const group of agg.groups) {
-      out += `\n${group.label}:\n`;
+      out += `\n${group.label}: ${summarizeGroup(group.items, group.sessionCount, useTokens, useLoc)}\n`;
       const hasTokenData = group.items.some((b) => b.inputTokens !== undefined || b.outputTokens !== undefined);
 
       if (showHistogram) {
@@ -287,6 +287,36 @@ function formatValue(item: AggregateRow | TimeBucket, useTokens: boolean, useLoc
   if (useLoc) return formatLoc(netLoc(item));
   if (useTokens) return humanizeTokens(tokenSum(item));
   return formatCost(item.costAmount);
+}
+
+// Format the summary that follows a group header, e.g.
+//   .md: +12,345 lines across 5 sessions
+//   ~/dev/foo: $4.23 across 2 sessions
+// Prefer the aggregator-provided unique sessionCount; fall back to summing
+// per-item counts when the aggregator didn't populate one.
+function summarizeGroup(
+  items: (AggregateRow | TimeBucket)[],
+  groupSessionCount: number | undefined,
+  useTokens: boolean,
+  useLoc: boolean,
+): string {
+  let value = 0;
+  for (const it of items) {
+    value += useLoc ? netLoc(it) : useTokens ? tokenSum(it) : it.costAmount;
+  }
+
+  const valueStr = useLoc
+    ? `${formatLoc(value)} lines`
+    : useTokens
+      ? `${humanizeTokens(value)} tokens`
+      : formatCost(value);
+
+  const n = groupSessionCount ?? items.reduce((s, it) => s + (it.sessionCount ?? 0), 0);
+  if (n === 0) {
+    return valueStr;
+  }
+  const word = n === 1 ? "session" : "sessions";
+  return `${valueStr} across ${n} ${word}`;
 }
 
 function renderFlatGroupedList(

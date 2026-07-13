@@ -183,8 +183,9 @@ function makeTimeSeriesGrouped(opts: Partial<CostAggregate & { kind: "timeSeries
 test("renderText timeSeriesGrouped: shows group headers with buckets", () => {
   const agg = makeTimeSeriesGrouped();
   const result = renderText(agg);
-  assert.ok(result.includes("\nmyapp:\n"));
-  assert.ok(result.includes("\nother:\n"));
+  // Header is now "<label>: <summary>" — match with a prefix regex.
+  assert.match(result, /\nmyapp: /);
+  assert.match(result, /\nother: /);
   assert.ok(result.includes("06/14"));
 });
 
