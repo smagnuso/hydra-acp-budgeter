@@ -282,3 +282,49 @@ export async function fetchUsageEventsFromDaemon(
   }
   return out;
 }
+
+// In-memory cache — blob content is immutable per (sessionId, hash) so we
+// safely reuse across many edit events in a single CLI invocation. The
+// budgeter process is short-lived so no eviction is needed.
+const toolBlobCache = new Map<string, string | null>();
+
+/**
+ * Fetch the plain-text body of an externalized tool blob referenced by
+ * `{ __hydraBlob: <hash> }` in a history diff. Returns null when the daemon
+ * is unreachable, unauthenticated, or the blob isn't found. Caller must
+ * tolerate null.
+ */
+export async function fetchToolBlob(
+  sessionId: string,
+  hash: string,
+): Promise<string | null> {
+  const cacheKey = `${sessionId}|${hash}`;
+  const cached = toolBlobCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const cfg = resolveConfig();
+  if (cfg === undefined) {
+    toolBlobCache.set(cacheKey, null);
+    return null;
+  }
+  const url = `${cfg.daemonUrl.replace(/\/$/, "")}/v1/sessions/${encodeURIComponent(sessionId)}/tools/${encodeURIComponent(hash)}`;
+  let resp: Response;
+  try {
+    resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${cfg.token}` },
+    });
+  } catch (err) {
+    log.debug(`tool blob fetch failed: ${(err as Error).message}`);
+    toolBlobCache.set(cacheKey, null);
+    return null;
+  }
+  if (!resp.ok) {
+    log.debug(`tool blob endpoint HTTP ${resp.status} for ${hash}`);
+    toolBlobCache.set(cacheKey, null);
+    return null;
+  }
+  const text = await resp.text();
+  toolBlobCache.set(cacheKey, text);
+  return text;
+}

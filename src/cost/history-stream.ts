@@ -5,6 +5,7 @@ import { logger } from "../util/log.js";
 import type { SessionRecord } from "./session-store.js";
 import { sessionsDir } from "./session-store.js";
 import { filetypeForPath } from "./language.js";
+import { fetchToolBlob } from "./daemon-client.js";
 
 const log = logger("cost/history-stream");
 
@@ -206,6 +207,26 @@ export async function* streamHistoryEvents(
   }
 }
 
+// Large diff bodies are offloaded to content-addressed blobs and referenced
+// inline as { __hydraBlob: "<sha>", bytes: N }. Fetch and resolve them so
+// line counts reflect real edits, not zero-lengthed placeholders.
+async function resolveDiffText(
+  sessionId: string,
+  value: unknown,
+): Promise<string> {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const hash = (value as { __hydraBlob?: unknown }).__hydraBlob;
+    if (typeof hash === "string") {
+      const body = await fetchToolBlob(sessionId, hash);
+      return body ?? "";
+    }
+  }
+  return "";
+}
+
 function countLines(s: string): number {
   if (s.length === 0) {
     return 0;
@@ -318,8 +339,8 @@ export async function* streamHistoryEditEvents(
           const path = typeof item.path === "string" ? item.path : "";
           if (path === "") continue;
 
-          const oldText = typeof item.oldText === "string" ? item.oldText : "";
-          const newText = typeof item.newText === "string" ? item.newText : "";
+          const oldText = await resolveDiffText(session.sessionId, item.oldText);
+          const newText = await resolveDiffText(session.sessionId, item.newText);
 
           const key = `${toolCallId}|${path}`;
           if (!latest.has(key)) {
