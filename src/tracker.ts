@@ -1,18 +1,33 @@
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import type { BudgetState } from "./rule.js";
 import { logger } from "./util/log.js";
 
 const log = logger("tracker");
 
+// Backing-store interface. Encapsulates the two extension_state RPCs the
+// tracker cares about. Injected so tests can supply an in-memory fake
+// without wiring up a whole transformer client.
+export interface StateStore {
+  // Fetch the persisted PerSessionState for one session, or undefined
+  // when no data has been written yet.
+  get(sessionId: string): Promise<PerSessionState | undefined>;
+  // Overwrite the PerSessionState for one session. Fire-and-forget from
+  // the tracker's perspective — failures log a warning but never propagate
+  // (tracker state is authoritative in-memory during the process lifetime).
+  set(sessionId: string, state: PerSessionState): Promise<void>;
+  // Enumerate every session id the daemon knows about, so the tracker can
+  // hydrate its in-memory map at boot. Returning [] disables boot
+  // hydration — the tracker will still lazily load per session as
+  // usage_updates arrive.
+  listSessionIds(): Promise<string[]>;
+}
+
 export interface TrackerOptions {
   softLimit: number;
   hardLimit: number;
   currency: string;
-  // Absolute path of the JSON file that holds the persisted per-session
-  // cost map. Loaded on construction, atomically rewritten on every
-  // applyUsageUpdate. Pass undefined to disable persistence (tests).
-  statePath?: string;
+  // Backing store for per-session cost state. Absent = tests / dry-run
+  // mode: state lives in memory only, nothing is persisted.
+  store?: StateStore;
 }
 
 export interface TrackerSnapshot {
@@ -27,18 +42,21 @@ export interface TrackerSnapshot {
 // Cost arrives via usage_update notifications. Each one carries a running
 // total *for the current agent life* — not strictly monotonic across
 // resurrects, but monotonic within a single agent process. We store the
-// latest amount we've observed per sessionId and sum across sessions to
-// derive the process-wide total. The map is persisted so spend survives
-// daemon restarts (and resets — see adoptFromDisk / src/paths.ts).
+// latest amount we've observed per sessionId (via the injected store) and
+// sum across sessions to derive the process-wide total.
 //
 // Cross-life cumulativeCost (when the daemon stamps it on the envelope)
 // is honored if present, otherwise we fall back to costAmount.
-interface PerSessionState {
+//
+// PerSessionState is exposed on this interface because it's the exact
+// shape written to extension_state; keeping it single-source-of-truth
+// prevents drift between the on-disk format and the in-memory model.
+export interface PerSessionState {
   // Highest observed running cost. Resets on resurrect would otherwise
   // make the sum dip; clamping with max keeps the total non-decreasing.
   cost: number;
   // Cost at the last reset. Effective spend = max(0, cost - baseline).
-  // Allows reset without needing to discard the agent's running total.
+  // Allows reset without discarding the agent's running total.
   baseline: number;
   // Mirror of the agent's reported currency for the latest update. Used
   // for cross-checking — if a session reports a currency different from
@@ -46,23 +64,56 @@ interface PerSessionState {
   currency: string | undefined;
 }
 
-interface PersistedState {
-  // Schema marker — bumped if the on-disk layout ever changes.
-  version: 1;
-  sessions: Record<string, PerSessionState>;
-}
-
 export class CostTracker {
   private sessions = new Map<string, PerSessionState>();
+  // Sessions we know are absent in the store (checked once, got nothing
+  // back). Prevents repeat RPCs for sessions that never emitted cost.
+  private confirmedAbsent = new Set<string>();
+  // In-flight hydration promises so concurrent applyUsageUpdate calls
+  // for a not-yet-loaded session serialize on the same fetch.
+  private hydrating = new Map<string, Promise<void>>();
   private currentState: BudgetState = "ok";
-  // Last JSON we wrote to disk. The watcher uses this to ignore its own
-  // writes — if the file's content matches, we did it.
-  private lastWrittenJson = "";
 
-  constructor(private readonly opts: TrackerOptions) {
-    if (opts.statePath) {
-      this.loadFromDisk();
+  constructor(private readonly opts: TrackerOptions) {}
+
+  // Boot-time bulk hydration. Iterates every session the daemon knows
+  // about and loads its bucket. Best-effort — a failure on one session
+  // is logged and skipped rather than aborting the boot. Safe to call
+  // multiple times; already-loaded sessions are skipped.
+  async hydrateAll(): Promise<void> {
+    if (!this.opts.store) return;
+    let ids: string[];
+    try {
+      ids = await this.opts.store.listSessionIds();
+    } catch (err) {
+      log.warn(
+        `boot hydration failed to list sessions: ${(err as Error).message} — continuing with lazy loading`,
+      );
+      return;
     }
+    for (const id of ids) {
+      if (this.sessions.has(id) || this.confirmedAbsent.has(id)) continue;
+      try {
+        const state = await this.opts.store.get(id);
+        if (state) {
+          this.sessions.set(id, state);
+        } else {
+          this.confirmedAbsent.add(id);
+        }
+      } catch (err) {
+        log.warn(
+          `boot hydration failed for session ${id.slice(0, 12)}: ${(err as Error).message}`,
+        );
+      }
+    }
+    this.currentState = deriveState(
+      this.totalCost(),
+      this.opts.softLimit,
+      this.opts.hardLimit,
+    );
+    log.info(
+      `hydrated ${this.sessions.size} session(s), total=${this.totalCost().toFixed(2)}`,
+    );
   }
 
   applyUsageUpdate(
@@ -82,8 +133,38 @@ export class CostTracker {
       currency: cost.currency ?? prior.currency,
     };
     this.sessions.set(sessionId, next);
-    this.persist();
+    this.confirmedAbsent.delete(sessionId);
+    void this.persistOne(sessionId, next);
     return this.snapshotFor(sessionId);
+  }
+
+  // Ensure this session's state is loaded from the store into memory.
+  // Callers use this when a session first appears (session.opened event)
+  // so total is accurate before any usage_update arrives. Serializes
+  // concurrent calls for the same session on a single in-flight fetch.
+  async ensureHydrated(sessionId: string): Promise<void> {
+    if (!this.opts.store) return;
+    if (this.sessions.has(sessionId) || this.confirmedAbsent.has(sessionId)) return;
+    const inFlight = this.hydrating.get(sessionId);
+    if (inFlight) return inFlight;
+    const p = (async () => {
+      try {
+        const state = await this.opts.store!.get(sessionId);
+        if (state) {
+          this.sessions.set(sessionId, state);
+        } else {
+          this.confirmedAbsent.add(sessionId);
+        }
+      } catch (err) {
+        log.warn(
+          `hydrate session ${sessionId.slice(0, 12)} failed: ${(err as Error).message}`,
+        );
+      } finally {
+        this.hydrating.delete(sessionId);
+      }
+    })();
+    this.hydrating.set(sessionId, p);
+    return p;
   }
 
   // Public snapshot accessor for the synthetic events (session_opened,
@@ -124,141 +205,27 @@ export class CostTracker {
     return this.currentState;
   }
 
-  // Baseline all sessions from their current cost so effective spend
-  // reads zero without discarding the agent's running total.
+  // Baseline all in-memory sessions from their current cost so effective
+  // spend reads zero without discarding the agent's running total. Also
+  // writes the new baselines through to the store, so a subsequent
+  // daemon restart doesn't undo the reset.
   reset(): void {
-    this.baselineFromCurrent();
-    this.persist();
-  }
-
-  private baselineFromCurrent(): void {
     for (const [id, s] of this.sessions) {
-      this.sessions.set(id, { ...s, baseline: s.cost });
+      const next: PerSessionState = { ...s, baseline: s.cost };
+      this.sessions.set(id, next);
+      void this.persistOne(id, next);
     }
     this.currentState = "ok";
   }
 
-  // Re-read the state file and replace in-memory state if it changed
-  // from what we last wrote. Called from the fs.watch handler in bridge.
-  // Returns true when state was adopted (caller can react if it cares).
-  adoptFromDisk(): boolean {
-    if (!this.opts.statePath) {
-      return false;
-    }
-    let raw: string;
+  private async persistOne(sessionId: string, state: PerSessionState): Promise<void> {
+    if (!this.opts.store) return;
     try {
-      raw = readFileSync(this.opts.statePath, "utf8");
+      await this.opts.store.set(sessionId, state);
     } catch (err) {
-      const e = err as NodeJS.ErrnoException;
-      if (e.code === "ENOENT") {
-        // File deleted = reset. Baseline all sessions from current cost
-        // so effective spend reads zero without discarding the agent's
-        // running total (it will keep reporting the same numbers).
-        if (this.sessions.size === 0) {
-          return false;
-        }
-        log.info("state file removed externally — baselining from current totals");
-        this.baselineFromCurrent();
-        this.lastWrittenJson = "";
-        return true;
-      }
-      log.warn(`read state failed: ${e.message}`);
-      return false;
-    }
-    if (raw === this.lastWrittenJson) {
-      return false;
-    }
-    // Don't advance currentState — leave it at the pre-load value so
-    // consumeStateTransition detects any upward crossing on the next tick.
-    const adopted = this.applyPersisted(raw, false);
-    if (adopted) {
-      this.lastWrittenJson = raw;
-      log.info(`adopted state from disk (total=${this.totalCost().toFixed(2)})`);
-    }
-    return adopted;
-  }
-
-  private loadFromDisk(): void {
-    if (!this.opts.statePath) {
-      return;
-    }
-    let raw: string;
-    try {
-      raw = readFileSync(this.opts.statePath, "utf8");
-    } catch (err) {
-      const e = err as NodeJS.ErrnoException;
-      if (e.code !== "ENOENT") {
-        log.warn(`read state failed: ${e.message}; starting fresh`);
-      }
-      return;
-    }
-    if (this.applyPersisted(raw)) {
-      this.lastWrittenJson = raw;
-      log.info(
-        `loaded state from ${this.opts.statePath} (total=${this.totalCost().toFixed(2)})`,
+      log.warn(
+        `persist ${sessionId.slice(0, 12)} failed: ${(err as Error).message}`,
       );
-    }
-  }
-
-  private applyPersisted(raw: string, updateState = true): boolean {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (err) {
-      log.warn(`state file malformed: ${(err as Error).message}; ignoring`);
-      return false;
-    }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      log.warn("state file is not an object; ignoring");
-      return false;
-    }
-    const obj = parsed as Partial<PersistedState>;
-    const sessions = obj.sessions ?? {};
-    if (typeof sessions !== "object" || Array.isArray(sessions)) {
-      log.warn("state.sessions is not an object; ignoring");
-      return false;
-    }
-    this.sessions.clear();
-    for (const [id, val] of Object.entries(sessions)) {
-      if (val && typeof val === "object" && typeof (val as PerSessionState).cost === "number") {
-        const v = val as PerSessionState;
-        this.sessions.set(id, {
-          cost: v.cost,
-          baseline: typeof v.baseline === "number" ? v.baseline : 0,
-          currency: typeof v.currency === "string" ? v.currency : undefined,
-        });
-      }
-    }
-    if (updateState) {
-      this.currentState = deriveState(
-        this.totalCost(),
-        this.opts.softLimit,
-        this.opts.hardLimit,
-      );
-    }
-    return true;
-  }
-
-  private persist(): void {
-    if (!this.opts.statePath) {
-      return;
-    }
-    const payload: PersistedState = {
-      version: 1,
-      sessions: Object.fromEntries(this.sessions),
-    };
-    const json = JSON.stringify(payload, null, 2);
-    if (json === this.lastWrittenJson) {
-      return;
-    }
-    try {
-      mkdirSync(dirname(this.opts.statePath), { recursive: true });
-      const tmp = `${this.opts.statePath}.tmp`;
-      writeFileSync(tmp, json, { encoding: "utf8", mode: 0o600 });
-      renameSync(tmp, this.opts.statePath);
-      this.lastWrittenJson = json;
-    } catch (err) {
-      log.warn(`persist failed: ${(err as Error).message}`);
     }
   }
 
@@ -268,22 +235,6 @@ export class CostTracker {
       sum += Math.max(0, s.cost - s.baseline);
     }
     return sum;
-  }
-}
-
-// Delete the persisted state file. Used by the `reset` subcommand when
-// no live process is running (or as the message the live process picks
-// up via fs.watch).
-export function deleteStateFile(statePath: string): boolean {
-  try {
-    unlinkSync(statePath);
-    return true;
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException;
-    if (e.code === "ENOENT") {
-      return false;
-    }
-    throw err;
   }
 }
 

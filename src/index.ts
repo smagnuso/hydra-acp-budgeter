@@ -4,9 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.js";
 import { BudgeterBridge } from "./bridge.js";
-import { stateFilePath } from "./paths.js";
 import { DEFAULT_RULE } from "./rule.js";
-import { deleteStateFile } from "./tracker.js";
 import { logger, setDebug } from "./util/log.js";
 import { scanSessions, enrichSessionsWithLoc } from "./cost/session-store.js";
 import { listSessionsFromDaemon, fetchUsageEventsFromDaemon } from "./cost/daemon-client.js";
@@ -30,8 +28,17 @@ function readVersion(): string {
 }
 
 function runReset(): void {
-    deleteStateFile(stateFilePath());
-    process.stdout.write("hydra-acp-budgeter accumulated cost reset\n");
+    // Legacy CLI subcommand. Cost state now lives in each session's
+    // meta.json via extension_state, so there's no single file to
+    // delete out-of-band. Direct the user to the slash-command path,
+    // which reaches the live transformer over WS and resets across
+    // all in-memory sessions.
+    process.stderr.write(
+        `hydra-acp-budgeter: 'reset' as a CLI subcommand is no longer supported.\n` +
+        `Run \`/hydra hydra-acp-budgeter reset\` in a live hydra session instead.\n` +
+        `Cost state is now persisted per-session in meta.json (extension_state).\n`,
+    );
+    process.exit(2);
 }
 
 const COST_HELP = `Usage: hydra budgeter usage [OPTIONS]
@@ -349,15 +356,14 @@ async function runTransformer(): Promise<void> {
     const config = loadConfig();
     setDebug(config.debug);
 
-    const statePath = stateFilePath();
     const bridge = new BudgeterBridge({
         daemonWsUrl: config.hydraWsUrl,
+        daemonHttpBase: config.hydraDaemonUrl,
         token: config.hydraToken,
         softLimit: config.softLimit,
         hardLimit: config.hardLimit,
         currency: config.currency,
         rule: DEFAULT_RULE,
-        statePath,
     });
     bridge.start();
 
@@ -370,7 +376,7 @@ async function runTransformer(): Promise<void> {
     process.on("SIGTERM", () => shutdown("SIGTERM"));
 
     log.info(
-        `hydra-acp-budgeter up; daemon=${config.hydraDaemonUrl} soft=${config.softLimit} hard=${config.hardLimit} ${config.currency} state=${statePath}`,
+        `hydra-acp-budgeter up; daemon=${config.hydraDaemonUrl} soft=${config.softLimit} hard=${config.hardLimit} ${config.currency} state=per-session (extension_state)`,
     );
 }
 

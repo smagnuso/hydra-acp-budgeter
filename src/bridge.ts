@@ -1,5 +1,3 @@
-import { watch, type FSWatcher } from "node:fs";
-import { basename, dirname } from "node:path";
 import { TransformerClient } from "./acp/transformer.js";
 import type {
   JsonRpcNotification,
@@ -10,23 +8,21 @@ import type {
 import { Enforcer } from "./enforce.js";
 import { EventRouter } from "./router.js";
 import type { RuleFunction } from "./rule.js";
-import { CostTracker } from "./tracker.js";
+import { CostTracker, type PerSessionState, type StateStore } from "./tracker.js";
 import { logger } from "./util/log.js";
 
 const log = logger("bridge");
 
 export interface BridgeOptions {
   daemonWsUrl: string;
+  // HTTP base for the daemon (used to list sessions on boot for
+  // hydration; the tracker's per-session reads/writes go over WS).
+  daemonHttpBase: string;
   token: string;
   softLimit: number;
   hardLimit: number;
   currency: string;
   rule: RuleFunction;
-  // Absolute path to the persisted state file. Loaded on startup,
-  // rewritten on every usage_update. The bridge also fs.watches it so
-  // external resets (eg. `hydra-acp-budgeter reset` deleting the file)
-  // are picked up without restarting.
-  statePath?: string;
 }
 
 // The set of intercepts the budgeter declares to the daemon. Kept in one
@@ -51,8 +47,6 @@ export class BudgeterBridge {
   private readonly tracker: CostTracker;
   private readonly enforcer: Enforcer;
   private readonly router: EventRouter;
-  private watcher: FSWatcher | undefined;
-  private watchTimer: NodeJS.Timeout | undefined;
   private stopped = false;
 
   constructor(private readonly opts: BridgeOptions) {
@@ -61,11 +55,19 @@ export class BudgeterBridge {
       token: opts.token,
       intercepts: BUDGETER_INTERCEPTS,
     });
+    // Backing store for per-session cost: read/write extension_state on
+    // the session's meta.json via daemon RPCs. Each session's bucket
+    // holds one PerSessionState under the `state` key.
+    const store: StateStore = {
+      get: (sessionId) => this.readSessionState(sessionId),
+      set: (sessionId, state) => this.writeSessionState(sessionId, state),
+      listSessionIds: () => this.listSessionIds(),
+    };
     this.tracker = new CostTracker({
       softLimit: opts.softLimit,
       hardLimit: opts.hardLimit,
       currency: opts.currency,
-      statePath: opts.statePath,
+      store,
     });
     this.enforcer = new Enforcer(this.client, log);
     this.router = new EventRouter(
@@ -84,9 +86,12 @@ export class BudgeterBridge {
     });
     this.client.on("open", () => {
       void this.registerSlashCommands();
+      // Boot hydration: pull every session's persisted state so `total`
+      // is accurate before any usage_update lands. Fire-and-forget —
+      // the tracker still lazy-loads on demand if this races or fails.
+      void this.tracker.hydrateAll();
     });
     this.client.start();
-    this.startWatcher();
   }
 
   private async registerSlashCommands(): Promise<void> {
@@ -114,53 +119,68 @@ export class BudgeterBridge {
       return;
     }
     this.stopped = true;
-    if (this.watcher) {
-      this.watcher.close();
-      this.watcher = undefined;
-    }
-    if (this.watchTimer) {
-      clearTimeout(this.watchTimer);
-      this.watchTimer = undefined;
-    }
     this.client.stop();
   }
 
-  // Watch the state file's parent directory so we still see events when
-  // the file is created later (e.g. first usage_update of a fresh run)
-  // or deleted entirely (the reset subcommand). fs.watch on a missing
-  // file throws on some platforms, but the parent dir is created by
-  // CostTracker.persist before any write happens, and the daemon writes
-  // the .pid file there even sooner — so the dir reliably exists by
-  // the time start() runs. We still try/catch in case it doesn't.
-  private startWatcher(): void {
-    if (!this.opts.statePath) {
-      return;
-    }
-    const dir = dirname(this.opts.statePath);
-    const file = basename(this.opts.statePath);
+  // Fetch this session's persisted PerSessionState from its meta.json
+  // extension_state bucket via the daemon. Returns undefined when no
+  // data has been written yet (fresh session, or one that never
+  // emitted usage_update pre-migration).
+  private async readSessionState(
+    sessionId: string,
+  ): Promise<PerSessionState | undefined> {
+    const res = await this.client.request<{ value?: unknown }>(
+      "hydra-acp/session/extension_state/get",
+      { sessionId, key: "state" },
+    );
+    return decodePerSessionState(res?.value);
+  }
+
+  // Write this session's PerSessionState back into extension_state.
+  // Under a single "state" key so all three fields survive together
+  // (writing them as separate keys would risk torn reads on the
+  // subsequent get).
+  private async writeSessionState(
+    sessionId: string,
+    state: PerSessionState,
+  ): Promise<void> {
+    await this.client.request("hydra-acp/session/extension_state/set", {
+      sessionId,
+      key: "state",
+      value: state,
+    });
+  }
+
+  // Enumerate every session the daemon knows about. Hits the REST
+  // endpoint since it's cheaper than N per-session WS round-trips for
+  // hydration (a single response carries the full list). Returns [] on
+  // any HTTP error — hydration is best-effort and the tracker will
+  // lazily load per session on demand.
+  private async listSessionIds(): Promise<string[]> {
+    const base = this.opts.daemonHttpBase.replace(/\/+$/, "");
     try {
-      this.watcher = watch(dir, (eventType, filename) => {
-        if (filename && filename !== file) {
-          return;
-        }
-        // fs.watch can fire 1–N times per logical change (especially
-        // when our own atomic-rename hits it). Debounce briefly so we
-        // do at most one re-read per burst.
-        if (this.watchTimer) {
-          return;
-        }
-        this.watchTimer = setTimeout(() => {
-          this.watchTimer = undefined;
-          try {
-            this.tracker.adoptFromDisk();
-          } catch (err) {
-            log.warn(`adoptFromDisk failed: ${(err as Error).message}`);
-          }
-        }, 50);
+      const res = await fetch(`${base}/v1/sessions?includeNonInteractive=1`, {
+        headers: { Authorization: `Bearer ${this.opts.token}` },
       });
-      log.debug(`watching ${this.opts.statePath}`);
+      if (!res.ok) {
+        log.warn(
+          `list sessions: HTTP ${res.status} — hydration will be lazy`,
+        );
+        return [];
+      }
+      const body = (await res.json()) as { sessions?: Array<{ sessionId?: unknown }> };
+      const ids: string[] = [];
+      for (const entry of body.sessions ?? []) {
+        if (entry && typeof entry.sessionId === "string") {
+          ids.push(entry.sessionId);
+        }
+      }
+      return ids;
     } catch (err) {
-      log.warn(`fs.watch failed for ${dir}: ${(err as Error).message}`);
+      log.warn(
+        `list sessions failed: ${(err as Error).message} — hydration will be lazy`,
+      );
+      return [];
     }
   }
 
@@ -268,9 +288,15 @@ export class BudgeterBridge {
       return;
     }
     if (event === "session.opened") {
-      void this.router
-        .onLifecycle("session.opened", sessionId)
-        .catch((err) => log.warn(`session.opened error: ${(err as Error).message}`));
+      // Load this session's persisted bucket into the tracker BEFORE
+      // the router runs, so any state-dependent gate (e.g. warn on
+      // opening a session while over budget) sees the accurate total.
+      void this.tracker
+        .ensureHydrated(sessionId)
+        .then(() => this.router.onLifecycle("session.opened", sessionId))
+        .catch((err) =>
+          log.warn(`session.opened error: ${(err as Error).message}`),
+        );
       return;
     }
     if (event === "session.closed") {
@@ -316,4 +342,22 @@ export function runBudgeterCommand(
     };
   }
   return { kind: "error", message: `unknown verb: ${input.verb}` };
+}
+
+// Decode the raw JSON value returned by extension_state/get into a
+// typed PerSessionState. Returns undefined when the value is absent
+// (null / missing) or shape-mismatched — the tracker treats that the
+// same as "no data yet." Defensive against schema drift: if a future
+// version adds fields, this reader silently ignores them; if a past
+// version stored a slightly different shape, missing fields default
+// to the safe zero values.
+function decodePerSessionState(raw: unknown): PerSessionState | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const obj = raw as Record<string, unknown>;
+  if (typeof obj.cost !== "number") return undefined;
+  return {
+    cost: obj.cost,
+    baseline: typeof obj.baseline === "number" ? obj.baseline : 0,
+    currency: typeof obj.currency === "string" ? obj.currency : undefined,
+  };
 }

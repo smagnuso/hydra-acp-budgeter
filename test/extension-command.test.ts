@@ -1,17 +1,33 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
 import { runBudgeterCommand } from "../src/bridge.js";
-import { CostTracker } from "../src/tracker.js";
+import {
+  CostTracker,
+  type PerSessionState,
+  type StateStore,
+} from "../src/tracker.js";
 
-function makeTracker(statePath?: string): CostTracker {
+// Minimal in-memory store for tests that exercise reset persistence
+// through the new extension_state path.
+class MemoryStore implements StateStore {
+  readonly data = new Map<string, PerSessionState>();
+  async get(sessionId: string): Promise<PerSessionState | undefined> {
+    return this.data.get(sessionId);
+  }
+  async set(sessionId: string, state: PerSessionState): Promise<void> {
+    this.data.set(sessionId, state);
+  }
+  async listSessionIds(): Promise<string[]> {
+    return [...this.data.keys()];
+  }
+}
+
+function makeTracker(store?: StateStore): CostTracker {
   return new CostTracker({
     softLimit: 5,
     hardLimit: 10,
     currency: "USD",
-    statePath,
+    ...(store ? { store } : {}),
   });
 }
 
@@ -20,6 +36,10 @@ function applyCost(tracker: CostTracker, sessionId: string, amount: number) {
     sessionUpdate: "usage_update",
     cost: { amount, currency: "USD" },
   });
+}
+
+async function settle(): Promise<void> {
+  for (let i = 0; i < 4; i++) await Promise.resolve();
 }
 
 test("reset baselines spend to zero and returns a confirmation", () => {
@@ -40,20 +60,20 @@ test("reset baselines spend to zero and returns a confirmation", () => {
   assert.equal(tracker.snapshotFor("s1").total, 0);
 });
 
-test("reset persists the new baseline through the state file", () => {
-  const dir = mkdtempSync(join(tmpdir(), "budgeter-ext-cmd-"));
-  const statePath = join(dir, "state.json");
-  const tracker = makeTracker(statePath);
+test("reset persists the new baseline through the store (extension_state)", async () => {
+  const store = new MemoryStore();
+  const tracker = makeTracker(store);
   applyCost(tracker, "s1", 8);
-  assert.ok(existsSync(statePath), "state file should exist after a usage update");
+  await settle();
 
   runBudgeterCommand(tracker, "USD", { verb: "reset", sessionId: "s1" });
+  await settle();
 
-  const persisted = JSON.parse(readFileSync(statePath, "utf8")) as {
-    sessions: Record<string, { cost: number; baseline: number }>;
-  };
-  const session = persisted.sessions["s1"]!;
-  assert.equal(session.baseline, session.cost);
+  // After reset, the store has baseline == cost so a fresh tracker
+  // hydrating this session reads a total of zero.
+  const persisted = store.data.get("s1");
+  assert.ok(persisted, "store should have s1 after reset");
+  assert.equal(persisted!.baseline, persisted!.cost);
 });
 
 test("status reports per-session and total spend against soft/hard limits", () => {
@@ -86,20 +106,4 @@ test("unknown verbs return an error outcome instead of throwing", () => {
     return;
   }
   assert.match(outcome.message, /unknown verb: vaporize/);
-});
-
-test("reset survives a write race on the state file (atomic rename)", () => {
-  // Repro for the "tracker writes mid-reset" smoke: write a sentinel into
-  // the state file before reset, run reset, then confirm the sentinel was
-  // replaced with the new payload without partial-write corruption.
-  const dir = mkdtempSync(join(tmpdir(), "budgeter-ext-cmd-race-"));
-  const statePath = join(dir, "state.json");
-  writeFileSync(statePath, "{}", "utf8");
-
-  const tracker = makeTracker(statePath);
-  applyCost(tracker, "s1", 6);
-  runBudgeterCommand(tracker, "USD", { verb: "reset", sessionId: "s1" });
-
-  const persisted = JSON.parse(readFileSync(statePath, "utf8"));
-  assert.ok(persisted.sessions, "state file should contain sessions object after reset");
 });

@@ -218,7 +218,10 @@ test("aggregate with --bucket day: creates kind=timeSeries output", () => {
     makeEvent({ sessionId: "a", cumulativeCost: 1.0, ts: "2026-06-15T12:00:00.000Z" }),
     makeEvent({ sessionId: "b", cumulativeCost: 0.0, ts: "2026-06-14T17:00:00.000Z" }),
     makeEvent({ sessionId: "b", cumulativeCost: 2.5, ts: "2026-06-14T18:00:00.000Z" }),
-  ], { bucket: "day" });
+    // Explicit `since` — `bucket: "day"` alone would infer
+    // `since = now - 30 days`, which drifts these fixed dates in/out
+    // of range as the wall clock advances.
+  ], { bucket: "day", since: new Date("2026-06-01T00:00:00.000Z") });
   assert.equal(result.kind, "timeSeries");
   const ts = result as Extract<typeof result, { kind: "timeSeries" }>;
   assert.equal(ts.timeSeries.length, 2);
@@ -234,7 +237,9 @@ test("aggregate with --bucket week: groups by ISO week", () => {
     makeEvent({ sessionId: "a", cumulativeCost: 1.0, ts: "2026-06-15T12:00:00.000Z" }),
     makeEvent({ sessionId: "b", cumulativeCost: 0.0, ts: "2026-06-17T11:00:00.000Z" }),
     makeEvent({ sessionId: "b", cumulativeCost: 2.0, ts: "2026-06-17T12:00:00.000Z" }),
-  ], { bucket: "week" });
+    // Explicit `since` so the 6-month implicit window doesn't drift
+    // these fixed dates out of range.
+  ], { bucket: "week", since: new Date("2026-06-01T00:00:00.000Z") });
   assert.equal(result.kind, "timeSeries");
   const ts = result as Extract<typeof result, { kind: "timeSeries" }>;
   assert.equal(ts.timeSeries.length, 1);
@@ -249,13 +254,22 @@ test("aggregate with --bucket month: groups by calendar month", () => {
     makeEvent({ sessionId: "a", cumulativeCost: 1.0, ts: "2026-06-01T12:00:00.000Z" }),
     makeEvent({ sessionId: "b", cumulativeCost: 0.0, ts: "2026-07-15T11:00:00.000Z" }),
     makeEvent({ sessionId: "b", cumulativeCost: 2.0, ts: "2026-07-15T12:00:00.000Z" }),
-  ], { bucket: "month" });
+    // Explicit `since` so the 2-year implicit window doesn't drift
+    // these fixed dates out of range.
+  ], { bucket: "month", since: new Date("2026-06-01T00:00:00.000Z") });
   assert.equal(result.kind, "timeSeries");
   const ts = result as Extract<typeof result, { kind: "timeSeries" }>;
   assert.equal(ts.timeSeries.length, 2);
 });
 
 test("aggregate with --bucket sorts time series by bucket key", () => {
+  // `--bucket day` alone implicitly infers `--since = now - 30 days`
+  // (see aggregate.ts:407-409). Without an explicit `since`, fixed
+  // dates in this test drift in/out of the 30-day window based on the
+  // current wall clock — producing a flaky pass/fail depending on
+  // when the suite runs relative to those dates. Passing an explicit
+  // `since` isolates the test's intent (sort order across buckets)
+  // from the implicit-since inference.
   const result = aggregate([
     makeSession({ sessionId: "a", costAmount: 0.3, updatedAt: "2026-06-15T12:00:00.000Z" }),
     makeSession({ sessionId: "b", costAmount: 0.1, updatedAt: "2026-06-13T12:00:00.000Z" }),
@@ -267,7 +281,7 @@ test("aggregate with --bucket sorts time series by bucket key", () => {
     makeEvent({ sessionId: "b", cumulativeCost: 0.1, ts: "2026-06-13T12:00:00.000Z" }),
     makeEvent({ sessionId: "c", cumulativeCost: 0.0, ts: "2026-06-14T11:00:00.000Z" }),
     makeEvent({ sessionId: "c", cumulativeCost: 0.2, ts: "2026-06-14T12:00:00.000Z" }),
-  ], { bucket: "day" });
+  ], { bucket: "day", since: new Date("2026-06-01T00:00:00.000Z") });
   assert.equal(result.kind, "timeSeries");
   const ts = result as Extract<typeof result, { kind: "timeSeries" }>;
   assert.equal(ts.timeSeries.length, 3);
@@ -276,7 +290,7 @@ test("aggregate with --bucket sorts time series by bucket key", () => {
 });
 
 test("aggregate with --by session + --bucket day: creates kind=timeSeriesGrouped", () => {
-  const result = aggregate([makeSession({ sessionId: "a", costAmount: 1.0 }), makeSession({ sessionId: "b", costAmount: 2.0 })], [makeEvent({ sessionId: "a", deltaCost: 0.1, ts: "2026-06-15T12:00:00.000Z" }), makeEvent({ sessionId: "b", deltaCost: 0.2, ts: "2026-06-15T13:00:00.000Z" }), makeEvent({ sessionId: "a", deltaCost: 0.3, ts: "2026-06-14T12:00:00.000Z" })], { by: "session", bucket: "day" });
+  const result = aggregate([makeSession({ sessionId: "a", costAmount: 1.0 }), makeSession({ sessionId: "b", costAmount: 2.0 })], [makeEvent({ sessionId: "a", deltaCost: 0.1, ts: "2026-06-15T12:00:00.000Z" }), makeEvent({ sessionId: "b", deltaCost: 0.2, ts: "2026-06-15T13:00:00.000Z" }), makeEvent({ sessionId: "a", deltaCost: 0.3, ts: "2026-06-14T12:00:00.000Z" })], { by: "session", bucket: "day", since: new Date("2026-06-01T00:00:00.000Z") });
   assert.equal(result.kind, "timeSeriesGrouped");
   const tsg = result as Extract<typeof result, { kind: "timeSeriesGrouped" }>;
   assert.ok(tsg.groups.length >= 1);
@@ -300,7 +314,7 @@ test("aggregate with --by session + --bucket day: sessions without cwd still app
       makeEvent({ sessionId: "b", cumulativeCost: 0.0, ts: "2026-06-15T12:30:00.000Z" }),
       makeEvent({ sessionId: "b", cumulativeCost: 0.2, ts: "2026-06-15T13:00:00.000Z" }),
     ],
-    { by: "session", bucket: "day" },
+    { by: "session", bucket: "day", since: new Date("2026-06-01T00:00:00.000Z") },
   );
   assert.equal(result.kind, "timeSeriesGrouped");
   const tsg = result as Extract<typeof result, { kind: "timeSeriesGrouped" }>;
@@ -333,7 +347,9 @@ test("aggregate propagates currency from records", () => {
 });
 
 test("aggregate propagates currency from events when present (non-empty)", () => {
-  const result = aggregate([makeSession({ sessionId: "a", costAmount: 1.0 })], [{ ...makeEvent({ sessionId: "a", deltaCost: 0.1 }), currency: "EUR" }], { bucket: "day" });
+  // makeEvent's default `ts` is 2026-06-15T12:00Z — pin `since` so the
+  // 30-day implicit window doesn't drift it out of range.
+  const result = aggregate([makeSession({ sessionId: "a", costAmount: 1.0 })], [{ ...makeEvent({ sessionId: "a", deltaCost: 0.1 }), currency: "EUR" }], { bucket: "day", since: new Date("2026-06-01T00:00:00.000Z") });
   assert.equal((result as any).currency, "EUR");
 });
 
