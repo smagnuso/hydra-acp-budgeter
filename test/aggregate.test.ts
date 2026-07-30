@@ -262,6 +262,27 @@ test("aggregate with --bucket month: groups by calendar month", () => {
   assert.equal(ts.timeSeries.length, 2);
 });
 
+test("aggregate with --bucket weekday: collapses dates into Mon-Sun order", () => {
+  // 2026-06-15 is a Monday, 06-17 a Wednesday, 06-22 the next Monday —
+  // so the two Mondays must merge into a single bucket and sort first.
+  const result = aggregate([
+    makeSession({ sessionId: "a", costAmount: 1.0, updatedAt: "2026-06-22T12:00:00.000Z" }),
+    makeSession({ sessionId: "b", costAmount: 2.0, updatedAt: "2026-06-17T12:00:00.000Z" }),
+  ], [
+    makeEvent({ sessionId: "a", cumulativeCost: 0.0, ts: "2026-06-15T18:00:00.000Z" }),
+    makeEvent({ sessionId: "a", cumulativeCost: 1.0, ts: "2026-06-22T18:00:00.000Z" }),
+    makeEvent({ sessionId: "b", cumulativeCost: 0.0, ts: "2026-06-17T18:00:00.000Z" }),
+    makeEvent({ sessionId: "b", cumulativeCost: 2.0, ts: "2026-06-17T19:00:00.000Z" }),
+  ], { bucket: "weekday", since: new Date("2026-06-01T00:00:00.000Z") });
+  assert.equal(result.kind, "timeSeries");
+  const ts = result as Extract<typeof result, { kind: "timeSeries" }>;
+  const labels = ts.timeSeries.map((b) => b.bucket);
+  const order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  assert.deepEqual(labels, labels.slice().sort((a, b) => order.indexOf(a) - order.indexOf(b)));
+  assert.equal(new Set(labels).size, labels.length);
+  assert.ok(labels.length <= 7);
+});
+
 test("aggregate with --bucket sorts time series by bucket key", () => {
   // `--bucket day` alone implicitly infers `--since = now - 30 days`
   // (see aggregate.ts:407-409). Without an explicit `since`, fixed

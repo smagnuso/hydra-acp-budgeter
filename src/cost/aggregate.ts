@@ -9,7 +9,7 @@ import type { CostEvent, EditEvent } from "./history-stream.js";
 // ---------------------------------------------------------------------------
 
 /** Date bucket granularity. */
-export type BucketSpec = "hour" | "day" | "week" | "month";
+export type BucketSpec = "hour" | "day" | "week" | "month" | "weekday";
 
 /** Relative-duration spec accepted by parseSince(). */
 export type SinceSpec = string;
@@ -404,7 +404,7 @@ export function aggregate(
     if (opts.bucket === "hour") {
       now.setHours(now.getHours() - 24);
       effectiveSince = now;
-    } else if (opts.bucket === "day") {
+    } else if (opts.bucket === "day" || opts.bucket === "weekday") {
       now.setDate(now.getDate() - 30);
       effectiveSince = now;
     } else if (opts.bucket === "week") {
@@ -609,6 +609,13 @@ export function aggregate(
       });
     }
 
+    // Day-of-week collapses every matching day in the window into one of
+    // seven buckets, so the label carries no date. Sorting is by weekday
+    // index (see compareBuckets), not lexical.
+    if (opts.bucket === "weekday") {
+      return date.toLocaleDateString(undefined, { weekday: "short" });
+    }
+
     if (opts.bucket === "week") {
       const startOfWeek = new Date(date);
       const day = startOfWeek.getDay();
@@ -634,6 +641,35 @@ export function aggregate(
       month: "2-digit",
       day: "2-digit",
     });
+  };
+
+  // Bucket labels sort lexically, which happens to be chronological for
+  // hour/day/week/month keys. Weekday labels are names, so they need an
+  // explicit Monday-first index — built from the locale's own short names
+  // so it matches whatever bucketKey produced.
+  const weekdayOrder = new Map<string, number>();
+
+  if (opts.bucket === "weekday") {
+    const monday = new Date(2024, 0, 1);
+
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(monday);
+      d.setDate(monday.getDate() + i);
+      weekdayOrder.set(d.toLocaleDateString(undefined, { weekday: "short" }), i);
+    }
+  }
+
+  const compareBuckets = (a: TimeBucket, b: TimeBucket): number => {
+    if (opts.bucket === "weekday") {
+      const ai = weekdayOrder.get(a.bucket) ?? 7;
+      const bi = weekdayOrder.get(b.bucket) ?? 7;
+
+      if (ai !== bi) {
+        return ai - bi;
+      }
+    }
+
+    return a.bucket.localeCompare(b.bucket);
   };
 
   // -----------------------------------------------------------------------
@@ -919,7 +955,7 @@ export function aggregate(
       for (const grp of groupsMap.values()) {
         const items = Array.from(grp.buckets.values());
         for (const it of items) finalizeLoc(it as BucketEx);
-        items.sort((a, b) => a.bucket.localeCompare(b.bucket));
+        items.sort(compareBuckets);
         if (items.length > 0) groups.push({ label: grp.label, items, sessionCount: grp.sessions.size });
       }
       return { kind: "timeSeriesGrouped", groups, currency, totalSessions: uniqueSessions.size };
@@ -947,7 +983,7 @@ export function aggregate(
       for (const grp of groupsMap.values()) {
         const items = Array.from(grp.buckets.values());
         for (const it of items) finalizeLoc(it as BucketEx);
-        items.sort((a, b) => a.bucket.localeCompare(b.bucket));
+        items.sort(compareBuckets);
         if (items.length > 0) groups.push({ label: grp.label, items, sessionCount: grp.sessions.size });
       }
       return { kind: "timeSeriesGrouped", groups, currency };
@@ -965,7 +1001,7 @@ export function aggregate(
     }
     const timeSeries: TimeBucket[] = Array.from(bucketsMap.values());
     for (const it of timeSeries) finalizeLoc(it as BucketEx);
-    timeSeries.sort((a, b) => a.bucket.localeCompare(b.bucket));
+    timeSeries.sort(compareBuckets);
     return { kind: "timeSeries", timeSeries, currency, totalSessions: uniqueSessions.size };
   }
 
@@ -1018,7 +1054,7 @@ export function aggregate(
       for (const it of items) {
         finalize(it as TimeBucket & { _sessions?: Set<string> });
       }
-      items.sort((a, b) => a.bucket.localeCompare(b.bucket));
+      items.sort(compareBuckets);
       if (items.length > 0) {
         groups.push({ label: grp.label, items, sessionCount: grp.sessions.size });
       }
@@ -1064,7 +1100,7 @@ export function aggregate(
   for (const it of timeSeries) {
     finalize(it as TimeBucket & { _sessions?: Set<string> });
   }
-  timeSeries.sort((a, b) => a.bucket.localeCompare(b.bucket));
+  timeSeries.sort(compareBuckets);
 
   return { kind: "timeSeries", timeSeries, currency, totalSessions: uniqueSessions.size };
 }

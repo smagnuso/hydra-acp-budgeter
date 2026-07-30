@@ -45,7 +45,9 @@ const COST_HELP = `Usage: hydra budgeter usage [OPTIONS]
 
 Options:
   --since <date|duration>  Only include sessions updated after this date (e.g. 7d, 2024-01-01)
-  --bucket <hour|day|week|month>  Group results into time buckets (implies --since 24h/30d/6m/2y)
+  --bucket <hour|day|week|month|weekday>  Group results into time buckets (implies
+                           --since 24h/30d/6m/2y; weekday collapses the last 30 days
+                           into Mon-Sun)
   --by <dir|session|model|agent|filetype>  Group by dimension (filetype requires --metric loc)
   --depth <N>              Depth for --by dir grouping (default: 1)
   --dir <path>             Only include sessions under this directory prefix
@@ -194,7 +196,7 @@ async function runCost(argv: string[]): Promise<void> {
         effectiveSince = parsedSince;
     } else {
         const now = new Date();
-        if (bucket === "day") {
+        if (bucket === "day" || bucket === "weekday") {
             now.setDate(now.getDate() - 30);
         } else if (bucket === "week") {
             now.setMonth(now.getMonth() - 6);
@@ -272,7 +274,7 @@ async function runCost(argv: string[]): Promise<void> {
     const opts = {
         by: by as "dir" | "session" | "model" | "agent" | "filetype" | undefined,
         depth,
-        bucket: bucket as "day" | "week" | "month" | undefined,
+        bucket: bucket as "hour" | "day" | "week" | "month" | "weekday" | undefined,
         since: effectiveSince,
         interactive: interactiveOpt,
         dir,
@@ -306,7 +308,7 @@ function computeWindowLabel(args: {
         const pretty = prettyRelative(args.sinceRaw);
         return pretty !== undefined ? `last ${pretty}` : `since ${args.sinceRaw}`;
     }
-    if (args.bucket === "day") return "last 30 days";
+    if (args.bucket === "day" || args.bucket === "weekday") return "last 30 days";
     if (args.bucket === "week") return "last 6 months";
     if (args.bucket === "month") return "last 2 years";
     if (args.bucket === "hour") return "last 24 hours";
