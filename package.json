@@ -1,6 +1,6 @@
 {
   "name": "@hydra-acp/budgeter",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Cost-budget transformer extension for hydra-acp — warns on soft limit, rejects further prompts/sessions on hard limit.",
   "license": "MIT",
   "type": "module",
