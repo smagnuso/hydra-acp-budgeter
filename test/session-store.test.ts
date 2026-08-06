@@ -383,3 +383,75 @@ test("scanSessions handles session with relative cwd", () => {
     }
   });
 });
+
+// meta.json splits lifetime cost across cumulativeCost (retired agent lives)
+// and costAmount (current life). Reading costAmount alone under-reports any
+// session that has rotated its agent via compaction swap, /hydra agent, or a
+// resurrect.
+test("scanSessions sums cumulativeCost with costAmount", () => {
+  withTempSessionStore((sessionsPath) => {
+    const env = process.env.HYDRA_ACP_HOME;
+    try {
+      process.env.HYDRA_ACP_HOME = resolve(sessionsPath, "..");
+
+      writeMeta(sessionsPath, "sess_split", {
+        sessionId: "sess_split",
+        cwd: "/home/user/projects/myapp",
+        agentId: "agent_a",
+        currentModel: "claude-sonnet-4-20250514",
+        interactive: true,
+        currentUsage: {
+          costAmount: 1.5,
+          cumulativeCost: 3.5,
+          costCurrency: "USD",
+        },
+        title: "Swapped session",
+        createdAt: "2025-01-01T00:00:00.000Z",
+        updatedAt: "2026-06-16T00:00:00.000Z",
+      });
+
+      const records = scanSessions();
+      assert.equal(records.length, 1);
+      assert.equal(records[0].costAmount, 5.0);
+    } finally {
+      if (env === undefined) {
+        delete process.env.HYDRA_ACP_HOME;
+      } else {
+        process.env.HYDRA_ACP_HOME = env;
+      }
+    }
+  });
+});
+
+// Daemons predating the split collapse the lifetime total into costAmount and
+// omit cumulativeCost entirely; summing must leave those records untouched.
+test("scanSessions leaves legacy collapsed totals unchanged", () => {
+  withTempSessionStore((sessionsPath) => {
+    const env = process.env.HYDRA_ACP_HOME;
+    try {
+      process.env.HYDRA_ACP_HOME = resolve(sessionsPath, "..");
+
+      writeMeta(sessionsPath, "sess_legacy", {
+        sessionId: "sess_legacy",
+        cwd: "/home/user/projects/myapp",
+        agentId: "agent_a",
+        currentModel: "claude-sonnet-4-20250514",
+        interactive: true,
+        currentUsage: { costAmount: 5.0, costCurrency: "USD" },
+        title: "Legacy session",
+        createdAt: "2025-01-01T00:00:00.000Z",
+        updatedAt: "2026-06-16T00:00:00.000Z",
+      });
+
+      const records = scanSessions();
+      assert.equal(records.length, 1);
+      assert.equal(records[0].costAmount, 5.0);
+    } finally {
+      if (env === undefined) {
+        delete process.env.HYDRA_ACP_HOME;
+      } else {
+        process.env.HYDRA_ACP_HOME = env;
+      }
+    }
+  });
+});

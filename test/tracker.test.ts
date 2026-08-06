@@ -123,7 +123,11 @@ test("reset zeros all per-session state", () => {
   assert.equal(t.snapshotFor("s1").state, "ok");
 });
 
-test("cumulativeCost in _meta.hydra-acp overrides cost.amount", () => {
+// cost.amount is the collapsed lifetime total on every hydra wire shape
+// (PROTOCOL.md "Cost ledger scope"). _meta["hydra-acp"].cumulativeCost has
+// never been emitted by the daemon, and under the split ledger it would mean
+// "retired agent lives only" — a component, not the total. Ignore it.
+test("_meta.hydra-acp.cumulativeCost is ignored; cost.amount is authoritative", () => {
   const t = makeTracker();
   const update: Record<string, unknown> = {
     sessionUpdate: "usage_update",
@@ -131,8 +135,8 @@ test("cumulativeCost in _meta.hydra-acp overrides cost.amount", () => {
     _meta: { "hydra-acp": { cumulativeCost: 8 } },
   };
   const snap = t.applyUsageUpdate("s1", update);
-  assert.equal(snap.perSession, 8);
-  assert.equal(snap.total, 8);
+  assert.equal(snap.perSession, 1);
+  assert.equal(snap.total, 1);
 });
 
 test("missing cost leaves state unchanged", () => {

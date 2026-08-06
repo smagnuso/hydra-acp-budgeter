@@ -110,9 +110,27 @@ function readMetaJson(sessionPath: string): SessionRecord | undefined {
   const interactive = interactiveRaw === true;
 
   const costUsage = (obj.currentUsage ?? undefined) as
-    | { costAmount?: unknown; costCurrency?: unknown; used?: unknown }
+    | {
+        costAmount?: unknown;
+        cumulativeCost?: unknown;
+        costCurrency?: unknown;
+        used?: unknown;
+      }
     | undefined;
-  const costAmount = typeof costUsage?.costAmount === "number" ? costUsage.costAmount : 0;
+  // meta.json splits lifetime cost across two fields: cumulativeCost is spend
+  // from retired agent lives (compaction swaps, /hydra agent switches,
+  // resurrects) and costAmount is the current life's portion. Older daemons
+  // collapsed both into costAmount and omitted cumulativeCost, so summing is
+  // correct against either layout. Reading costAmount alone under-reports any
+  // session that has rotated its agent.
+  //
+  // The REST path (cost/daemon-client.ts) does not need this — the daemon
+  // already sums the two before serialising GET /v1/sessions.
+  const costAmount =
+    (typeof costUsage?.costAmount === "number" ? costUsage.costAmount : 0) +
+    (typeof costUsage?.cumulativeCost === "number"
+      ? costUsage.cumulativeCost
+      : 0);
   const costCurrency =
     typeof costUsage?.costCurrency === "string" ? costUsage.costCurrency : "";
   const contextTokens = typeof costUsage?.used === "number" ? costUsage.used : 0;

@@ -152,12 +152,15 @@ test("streamHistoryEvents clamps delta at zero on agent resurrection (cost drop)
   assert.equal(events[3].cumulativeCost, 1.5);
 });
 
-test("streamHistoryEvents prefers _meta.hydra-acp.cumulativeCost over cost.amount", async () => {
+// cost.amount is the collapsed lifetime total on every hydra wire shape
+// (PROTOCOL.md "Cost ledger scope"). _meta["hydra-acp"].cumulativeCost has
+// never been emitted by the daemon, and under the split ledger it would mean
+// "retired agent lives only" — a component, not the total. Ignore it.
+test("streamHistoryEvents ignores _meta.hydra-acp.cumulativeCost", async () => {
   const sessionsPath = setupTemp();
   const session = writeMeta(sessionsPath, "sess_cumulative_meta");
 
-  // cost.amount says 0.1 but _meta.hydra-acp.cumulativeCost says 5.5 —
-  // the stream should use cumulativeCost from _meta.
+  // A stray _meta.cumulativeCost must not displace cost.amount.
   writeHistory(sessionsPath, "sess_cumulative_meta", [
     JSON.stringify({
       method: "session/update",
@@ -181,11 +184,10 @@ test("streamHistoryEvents prefers _meta.hydra-acp.cumulativeCost over cost.amoun
 
   const events = await collectEvents(session);
   assert.equal(events.length, 2);
-  // Uses cumulativeCost from _meta, not cost.amount
-  assert.equal(events[0].cumulativeCost, 5.5);
-  assert.equal(events[0].deltaCost, 5.5);
-  assert.equal(events[1].cumulativeCost, 6.0);
-  assert.ok(Math.abs(events[1].deltaCost - 0.5) < 0.0001);
+  assert.equal(events[0].cumulativeCost, 0.1);
+  assert.equal(events[0].deltaCost, 0.1);
+  assert.equal(events[1].cumulativeCost, 0.2);
+  assert.ok(Math.abs(events[1].deltaCost - 0.1) < 0.0001);
 });
 
 test("streamHistoryEvents skips non-usage_update events", async () => {

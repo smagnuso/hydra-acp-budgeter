@@ -33,39 +33,25 @@ export interface EditEvent {
   linesRemoved: number;
 }
 
-function readCumulativeFromMeta(
-  meta: unknown,
-): number | undefined {
-  if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
-    return undefined;
-  }
-  const ns = (meta as Record<string, unknown>)["hydra-acp"];
-  if (!ns || typeof ns !== "object" || Array.isArray(ns)) {
-    return undefined;
-  }
-  const v = (ns as Record<string, unknown>).cumulativeCost;
-  return typeof v === "number" ? v : undefined;
-}
-
+// NOTE: hydra has never emitted _meta["hydra-acp"].cumulativeCost — verified
+// across all revisions of the daemon. This code previously preferred that
+// field over cost.amount, which is also the wrong semantics under hydra's
+// split ledger: cumulativeCost means "spend on retired agent lives" and is a
+// COMPONENT of the total, not the total. Per PROTOCOL.md "Cost ledger scope",
+// every wire shape carries a single collapsed lifetime total in cost.amount
+// with cumulativeCost omitted, so cost.amount is authoritative here.
 function readCost(
   update: Record<string, unknown>,
 ): { amount: number; currency: string | undefined } | undefined {
-  const cumulative = readCumulativeFromMeta(update._meta);
   const cost = (update.cost ?? undefined) as
     | { amount?: unknown; currency?: unknown }
     | undefined;
-  const amount =
-    cumulative !== undefined
-      ? cumulative
-      : typeof cost?.amount === "number"
-        ? cost.amount
-        : undefined;
-  if (amount === undefined) {
+  if (typeof cost?.amount !== "number") {
     return undefined;
   }
   const currency =
-    typeof cost?.currency === "string" ? cost.currency : undefined;
-  return { amount, currency };
+    typeof cost.currency === "string" ? cost.currency : undefined;
+  return { amount: cost.amount, currency };
 }
 
 function formatRecordedAt(rec: Record<string, unknown>): string {
@@ -83,9 +69,8 @@ function formatRecordedAt(rec: Record<string, unknown>): string {
  * Stream history.jsonl line-by-line for the given session(s), filtering to
  * usage_update envelopes and yielding delta-cost CostEvent rows.
  *
- * Delta logic mirrors src/tracker.ts:306-339 — prefer
- * params.update._meta['hydra-acp'].cumulativeCost when present, fall back to
- * params.update.cost.amount. Track previous cumulative per sessionId so that
+ * Delta logic mirrors src/tracker.ts — params.update.cost.amount carries the
+ * collapsed lifetime total. Track previous cumulative per sessionId so that
  * resurrects (where cost resets) do not produce negative deltas.
  */
 export async function* streamHistoryEvents(

@@ -45,9 +45,6 @@ export interface TrackerSnapshot {
 // latest amount we've observed per sessionId (via the injected store) and
 // sum across sessions to derive the process-wide total.
 //
-// Cross-life cumulativeCost (when the daemon stamps it on the envelope)
-// is honored if present, otherwise we fall back to costAmount.
-//
 // PerSessionState is exposed on this interface because it's the exact
 // shape written to extension_state; keeping it single-source-of-truth
 // prevents drift between the on-disk format and the in-memory model.
@@ -254,38 +251,23 @@ function rank(state: BudgetState): number {
   return 0;
 }
 
+// NOTE: hydra has never emitted _meta["hydra-acp"].cumulativeCost — verified
+// across all revisions of the daemon. This code previously preferred that
+// field over cost.amount, which is also the wrong semantics under hydra's
+// split ledger: cumulativeCost means "spend on retired agent lives" and is a
+// COMPONENT of the total, not the total. Per PROTOCOL.md "Cost ledger scope",
+// every wire shape carries a single collapsed lifetime total in cost.amount
+// with cumulativeCost omitted, so cost.amount is authoritative here.
 function readCost(
   update: Record<string, unknown>,
 ): { amount: number; currency: string | undefined } | undefined {
-  // hydra injects cumulative cost via _meta.hydra-acp.cumulativeCost on
-  // usage_update for sessions that have lived across multiple agents.
-  // Prefer that when present so resurrects don't undercount.
-  const cumulative = readCumulativeFromMeta(update._meta);
   const cost = (update.cost ?? undefined) as
     | { amount?: unknown; currency?: unknown }
     | undefined;
-  const amount =
-    cumulative !== undefined
-      ? cumulative
-      : typeof cost?.amount === "number"
-      ? cost.amount
-      : undefined;
-  if (amount === undefined) {
+  if (typeof cost?.amount !== "number") {
     return undefined;
   }
   const currency =
-    typeof cost?.currency === "string" ? cost.currency : undefined;
-  return { amount, currency };
-}
-
-function readCumulativeFromMeta(meta: unknown): number | undefined {
-  if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
-    return undefined;
-  }
-  const ns = (meta as Record<string, unknown>)["hydra-acp"];
-  if (!ns || typeof ns !== "object" || Array.isArray(ns)) {
-    return undefined;
-  }
-  const v = (ns as Record<string, unknown>).cumulativeCost;
-  return typeof v === "number" ? v : undefined;
+    typeof cost.currency === "string" ? cost.currency : undefined;
+  return { amount: cost.amount, currency };
 }
