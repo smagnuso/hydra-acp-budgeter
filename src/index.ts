@@ -392,6 +392,7 @@ function printUsage(): void {
             `\n` +
             `Flags:\n` +
             `  -v, --version                 Print version and exit\n` +
+            `  repair                        Reconcile recorded cost against the agent ledger\n` +
             `  -h, --help                    Show this help\n`
     );
 }
@@ -403,13 +404,18 @@ async function main(): Promise<void> {
         return;
     }
     if (argv[0] === "help" || argv.includes("--help") || argv.includes("-h")) {
-        if (argv[0] !== "usage" && argv[0] !== "cost") {
+        if (argv[0] !== "usage" && argv[0] !== "cost" && argv[0] !== "repair") {
             printUsage();
             return;
         }
     }
     if (argv[0] === "reset") {
         runReset();
+        return;
+    }
+    if (argv[0] === "repair") {
+        const { runRepair } = await import("./cost/repair-cmd.js");
+        await runRepair(argv.slice(1));
         return;
     }
     if (argv[0] === "usage" || argv[0] === "cost") {
