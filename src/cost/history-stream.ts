@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline";
 import { createReadStream, statSync } from "node:fs";
 import { resolve } from "node:path";
+import { transcriptLines } from "./history-files.js";
 import { logger } from "../util/log.js";
 import type { SessionRecord } from "./session-store.js";
 import { sessionsDir } from "./session-store.js";
@@ -79,38 +80,26 @@ export async function* streamHistoryEvents(
   const sessionList = Array.isArray(sessions) ? sessions : [sessions];
 
   for (const session of sessionList) {
-    const historyPath = resolve(
-      sessionsDir(),
-      session.sessionId,
-      "history.jsonl",
-    );
-
-    // Pre-check: history.jsonl may not exist (e.g. brand-new sessions).
-    // createReadStream does NOT throw synchronously on ENOENT — it emits
-    // an error event asynchronously, which would surface from the for-await
-    // loop as an unhandled rejection. Using statSync avoids that complexity.
-    try {
-      statSync(historyPath);
-    } catch (err) {
-      const e = err as NodeJS.ErrnoException;
-      if (e.code === "ENOENT") {
-        log.debug(`no history for ${session.sessionId}`);
-        continue;
-      }
-      log.debug(`stat failed for ${historyPath}: ${e.message}`);
-      continue;
-    }
-
-    const stream = createReadStream(historyPath, { encoding: "utf8" });
-    const rl = createInterface({ input: stream, crlfDelay: Infinity });
+    const sessionDir = resolve(sessionsDir(), session.sessionId);
 
     // Track previous cumulative cost per session to compute deltas.
     const prevCumulative = new Map<string, number>();
 
-    try {
-      for await (const line of rl) {
-        if (line.length === 0) continue;
+    // Archives can disagree with the live file. A session whose cost series
+    // was rewritten (or never repaired) has a single backwards jump at the
+    // seam, and differencing its archive prefix invents the whole inflated
+    // prefix as spend. meta.json's recorded lifetime is the authority for
+    // totals — it is stamped at rotation from a value known for certain —
+    // so if the streamed series overshoots it we stop trusting the series.
+    // session-store already collapses meta.json's cumulativeCost + costAmount
+    // into costAmount, so this is the recorded lifetime total.
+    const lifetime = session.costAmount > 0 ? session.costAmount : undefined;
+    const TOLERANCE = 1.5;
+    let emitted = 0;
+    let abandoned = false;
 
+    {
+      for await (const line of transcriptLines(sessionDir)) {
         let parsed: unknown;
         try {
           parsed = JSON.parse(line);
@@ -148,6 +137,16 @@ export async function* streamHistoryEvents(
         const prev = prevCumulative.get(session.sessionId) ?? 0;
         const delta = Math.max(0, cumulative - prev);
         prevCumulative.set(session.sessionId, cumulative);
+        if (lifetime !== undefined && emitted + delta > lifetime * TOLERANCE + 1) {
+          log.debug(
+            `${session.sessionId}: transcript series overshoots recorded lifetime ` +
+              `(${(emitted + delta).toFixed(2)} > ${lifetime.toFixed(2)}); ` +
+              `abandoning archive-derived events`,
+          );
+          abandoned = true;
+          break;
+        }
+        emitted += delta;
 
         // Token counts from update.usage — omit fields that are absent.
         const usage = (update.usage ?? undefined) as
@@ -185,9 +184,11 @@ export async function* streamHistoryEvents(
           ...(cacheWriteTokens !== undefined && { cacheWriteTokens }),
         };
       }
-    } finally {
-      rl.close();
-      stream.destroy();
+    }
+    if (abandoned) {
+      // Nothing further to emit for this session: the caller keeps whatever
+      // it already consumed, which is bounded by the tolerance check.
+      continue;
     }
   }
 }
