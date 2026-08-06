@@ -45,7 +45,7 @@ const COST_HELP = `Usage: hydra budgeter usage [OPTIONS]
 
 Options:
   --since <date|duration>  Only include sessions updated after this date (e.g. 7d, 2024-01-01)
-  --bucket <hour|day|week|month|weekday>  Group results into time buckets (implies
+  --bucket <hour|day|week|month|weekday|dayofweek>  Group results into time buckets (implies
                            --since 24h/30d/6m/2y; weekday collapses the last 30 days
                            into Mon-Sun)
   --by <dir|session|model|agent|filetype>  Group by dimension (filetype requires --metric loc)
@@ -100,7 +100,7 @@ async function runCost(argv: string[]): Promise<void> {
             since = argv[i];
         } else if (arg === "--bucket") {
             i += 1;
-            bucket = argv[i];
+            bucket = normalizeBucket(argv[i]);
             bucketExplicit = true;
         } else if (arg === "--by") {
             i += 1;
@@ -296,6 +296,30 @@ async function runCost(argv: string[]): Promise<void> {
     } else {
         const text = renderText(agg, { histogram, tokens: useTokens, loc: useLoc, windowLabel });
         process.stdout.write(text);
+    }
+}
+
+// Accept the obvious spellings of the day-of-week bucket. Without this an
+// unrecognized value silently fell through to the default hourly/24h view.
+function normalizeBucket(raw: string | undefined): string {
+    const value = (raw ?? "").toLowerCase();
+
+    switch (value) {
+        case "weekday":
+        case "dayofweek":
+        case "day-of-week":
+        case "day_of_week":
+        case "dow":
+            return "weekday";
+        case "hour":
+        case "day":
+        case "week":
+        case "month":
+            return value;
+        default:
+            throw new Error(
+                `unknown --bucket value ${JSON.stringify(raw ?? "")} (expected hour, day, week, month, or weekday)`,
+            );
     }
 }
 
