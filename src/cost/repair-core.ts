@@ -83,6 +83,89 @@ export interface SessionInput {
   readonly reportedTotal: number;
   readonly usageRows: readonly UsageRow[];
   readonly toolCalls: readonly ToolCallRow[];
+  /**
+   * meta.json's upstreamSessionId — the agent session the hydra session is
+   * sitting on right now. Required to split the repaired total into the
+   * persisted ledger's two halves; see `LedgerSplit`.
+   */
+  readonly currentUpstream?: string | undefined;
+}
+
+/**
+ * The repaired total, divided the way meta.json's cost ledger must store it.
+ *
+ * hydra persists cost as two fields: `cumulativeCost` is spend on upstreams
+ * that have been retired, and `costAmount` is spend on the upstream the
+ * session is on NOW. Writing the whole lifetime into `costAmount` gets the
+ * total right but the shape wrong, and the shape is load-bearing on the next
+ * resurrect: `Session.armCostLedgerProbe` arms the probe with `costAmount`
+ * and `reconcileCostLedger` then compares the agent's first report against
+ * it. That comparison assumes `costAmount` covers ONLY the current upstream.
+ *
+ * Violate it and the probe mis-adjudicates. An agent like opencode re-sums
+ * its own session on reload, so it reports just the current upstream's
+ * spend; against a probe inflated with retired spend that read as
+ * "incoming < retained", i.e. "the agent restarted at $0", and the whole
+ * collapsed total got banked on top of the fresh report — double-counting
+ * the current upstream. Observed on a real session ($335.27 recorded against
+ * $257.91 of true spend, over by exactly the current upstream's cost at
+ * repair time).
+ */
+export interface LedgerSplit {
+  /** Spend on retired upstreams -> meta.json cumulativeCost. */
+  readonly retired: number;
+  /** Spend on the current upstream -> meta.json costAmount. */
+  readonly current: number;
+  /** Per-upstream cost, ascending by first message. Ordering is the ledger's. */
+  readonly perUpstream: ReadonlyArray<{
+    readonly upstreamSessionId: string;
+    readonly cost: number;
+    readonly firstAt: number;
+    readonly lastAt: number;
+    readonly isCurrent: boolean;
+  }>;
+}
+
+/**
+ * Divide the ledger sum over `upstreams` into retired vs current.
+ *
+ * When `currentUpstream` is absent or unknown to the ledger the split cannot
+ * be made honestly, so everything is reported as `current` — which reproduces
+ * the pre-split behaviour and is exactly right for the single-upstream case
+ * that dominates the corpus.
+ */
+export function splitLedger(
+  ledger: Ledger,
+  upstreams: readonly string[],
+  currentUpstream: string | undefined,
+): LedgerSplit {
+  const per = upstreams.map((sid) => {
+    const entries = ledger.get(sid) ?? [];
+    let cost = 0;
+    for (const [, c] of entries) {
+      cost += c;
+    }
+    return {
+      upstreamSessionId: sid,
+      cost,
+      firstAt: entries[0]?.[0] ?? Number.MAX_SAFE_INTEGER,
+      lastAt: entries[entries.length - 1]?.[0] ?? 0,
+      isCurrent: sid === currentUpstream,
+    };
+  });
+  per.sort((a, b) => a.firstAt - b.firstAt);
+
+  const known = currentUpstream !== undefined && per.some((p) => p.isCurrent);
+  let retired = 0;
+  let current = 0;
+  for (const p of per) {
+    if (!known || p.isCurrent) {
+      current += p.cost;
+    } else {
+      retired += p.cost;
+    }
+  }
+  return { retired, current, perUpstream: per };
 }
 
 export type RefusalReason =
@@ -110,6 +193,8 @@ export interface RepairPlan {
   readonly rows: readonly RepairedRow[];
   readonly reportedTotal: number;
   readonly trueTotal: number;
+  /** How `trueTotal` must be laid out across meta.json's two cost fields. */
+  readonly split: LedgerSplit;
 }
 
 export interface Refusal {
@@ -338,6 +423,7 @@ export function planSession(
   // silently drop them. Observed on one real session, which the repair would
   // otherwise have moved further from the truth than it started.
   const trueTotal = truthAt(ledger, attribution.upstreams, Number.MAX_SAFE_INTEGER);
+  const split = splitLedger(ledger, attribution.upstreams, input.currentUpstream);
 
   return {
     ok: true,
@@ -347,6 +433,7 @@ export function planSession(
       rows,
       reportedTotal: input.reportedTotal,
       trueTotal,
+      split,
     },
   };
 }

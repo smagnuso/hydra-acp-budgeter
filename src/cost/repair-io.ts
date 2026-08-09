@@ -146,6 +146,10 @@ export interface SessionMeta {
   readonly sessionId: string;
   readonly agentId: string;
   readonly forkedFromSessionId?: string;
+  /** The agent session this hydra session is on now. */
+  readonly upstreamSessionId?: string;
+  /** Append-only record of every upstream this session has occupied. */
+  readonly upstreamGenerations?: ReadonlyArray<{ upstreamSessionId?: string }>;
   readonly currentUsage?: Record<string, unknown>;
   readonly extensionState?: Record<string, Record<string, unknown>>;
 }
@@ -171,6 +175,38 @@ export function readGate(meta: SessionMeta): Record<string, unknown> | undefined
   const bucket = meta.extensionState?.[BUDGETER_NS];
   const gate = bucket?.[REPAIR_KEY];
   return gate && typeof gate === "object" ? (gate as Record<string, unknown>) : undefined;
+}
+
+/**
+ * Every upstream a hydra session has ever occupied, as best the session's own
+ * records know: the repair gate's anchored set, the append-only generation
+ * list, and the upstream it sits on now.
+ *
+ * The union matters because the three disagree in practice. A gate records
+ * only what existed when the repair ran, so a session resurrected afterwards
+ * has a current upstream the gate never saw. A generation list can be richer
+ * than the gate (reconstructed by hand, or written by a daemon that post-dates
+ * the repair). Splitting against any single one of them understates the
+ * ancestry and moves the total instead of only its layout.
+ */
+export function knownUpstreams(meta: SessionMeta): string[] {
+  const gate = readGate(meta);
+  const out: string[] = [];
+  const push = (u: unknown): void => {
+    if (typeof u === "string" && u.length > 0 && !out.includes(u)) {
+      out.push(u);
+    }
+  };
+  if (gate !== undefined && Array.isArray(gate.upstreams)) {
+    for (const u of gate.upstreams) {
+      push(u);
+    }
+  }
+  for (const g of meta.upstreamGenerations ?? []) {
+    push(g.upstreamSessionId);
+  }
+  push(meta.upstreamSessionId);
+  return out;
 }
 
 export interface ScannedSession {
@@ -252,6 +288,7 @@ export function scanSession(sessionDir: string): ScannedSession | undefined {
       reportedTotal: reportedTotalOf(meta),
       usageRows,
       toolCalls,
+      currentUpstream: meta.upstreamSessionId,
     },
   };
 }

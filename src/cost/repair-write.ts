@@ -29,7 +29,7 @@ import { renameSync, writeFileSync, readFileSync, statSync, utimesSync } from "n
 import { gzipSync } from "node:zlib";
 import { resolve } from "node:path";
 import { logger } from "../util/log.js";
-import type { RepairPlan } from "./repair-core.js";
+import type { LedgerSplit, RepairPlan } from "./repair-core.js";
 import {
   BUDGETER_NS,
   REPAIR_KEY,
@@ -234,10 +234,19 @@ function writeMetaRepaired(
     at: new Date().toISOString(),
   };
 
-  // The split is collapsed deliberately: costAmount carries the agent's own
-  // lifetime total and cumulativeCost is cleared, which is the correct shape
-  // for a resurrect probe to compare against.
-  meta.currentUsage = { ...usage, costAmount: plan.trueTotal, cumulativeCost: undefined };
+  // Preserve hydra's two-field cost ledger rather than collapsing the total
+  // into costAmount. costAmount must cover ONLY the current upstream, because
+  // that is the quantity a later resurrect arms its ledger probe with; a
+  // collapsed total makes the probe read the agent's (correct) re-report as a
+  // restart-at-$0 and bank the whole thing again. See `LedgerSplit`.
+  //
+  // cumulativeCost stays absent when there is no retired spend, matching what
+  // a never-rotated session looks like on disk.
+  meta.currentUsage = {
+    ...usage,
+    costAmount: plan.split.current,
+    cumulativeCost: plan.split.retired > 0 ? plan.split.retired : undefined,
+  };
   const state = (meta.extensionState as Record<string, Record<string, unknown>> | undefined) ?? {};
   state[BUDGETER_NS] = { ...(state[BUDGETER_NS] ?? {}), [REPAIR_KEY]: gate };
   meta.extensionState = state;
@@ -248,10 +257,74 @@ function writeMetaRepaired(
 export interface RevertResult {
   readonly filesRewritten: string[];
   readonly rowsReverted: number;
+  /**
+   * Set when the revert was refused and NOTHING was written. A revert is only
+   * lossless while the session has been dormant since its repair; see
+   * `postRepairUsageRows`.
+   */
+  readonly refused?: string;
+  readonly postRepairRows?: number;
 }
 
-/** Undo a repair: pristine row values restored, markers and gate removed. */
-export function revertSession(sessionDir: string): RevertResult | undefined {
+/**
+ * Count usage rows recorded after the repair ran.
+ *
+ * These rows are the reason a revert is not universally safe. Repair stamps
+ * the pristine value into every row it rewrites, so those are restorable
+ * exactly — but a session that kept working after its repair has rows the
+ * repair never saw, carrying values the agent derived from the CORRECTED
+ * baseline. Nothing can un-correct them: there is no pristine value to
+ * restore, because they were never wrong.
+ *
+ * Reverting such a session therefore produces two defects at once. The
+ * transcript gets a discontinuity, with older rows back on the inflated
+ * baseline and newer rows still on the corrected one, which the delta
+ * streamer reads as a spike at the seam. And meta.json is rolled back to
+ * `originalCurrentUsage`, a snapshot from repair time, which silently
+ * discards every dollar spent since — real spend that was never inflated.
+ */
+export function postRepairUsageRows(sessionDir: string, repairedAt: string): number {
+  const cutoff = Date.parse(repairedAt);
+  if (Number.isNaN(cutoff)) {
+    return 0;
+  }
+  let n = 0;
+  for (const file of readTranscriptFiles(sessionDir)) {
+    for (const line of file.lines) {
+      if (line.length === 0 || !line.includes(`"usage_update"`)) {
+        continue;
+      }
+      // An already-stamped row is restorable, whenever it was written.
+      if (line.includes(REPAIR_KEY)) {
+        continue;
+      }
+      let entry: { recordedAt?: unknown; params?: { update?: { cost?: unknown } } };
+      try {
+        entry = JSON.parse(line) as typeof entry;
+      } catch {
+        continue;
+      }
+      if (typeof entry.params?.update?.cost !== "object" || entry.params.update.cost === null) {
+        continue;
+      }
+      if (typeof entry.recordedAt === "number" && entry.recordedAt > cutoff) {
+        n += 1;
+      }
+    }
+  }
+  return n;
+}
+
+/**
+ * Undo a repair: pristine row values restored, markers and gate removed.
+ *
+ * Refuses, writing nothing, if the session recorded usage after the repair —
+ * a revert cannot be lossless in that case. Pass `force` to accept the loss.
+ */
+export function revertSession(
+  sessionDir: string,
+  opts: { readonly force?: boolean } = {},
+): RevertResult | undefined {
   const meta = readMeta(sessionDir);
   if (meta === undefined) {
     return undefined;
@@ -260,6 +333,20 @@ export function revertSession(sessionDir: string): RevertResult | undefined {
   const gate = bucket?.[REPAIR_KEY] as RepairGate | undefined;
   if (!gate) {
     return undefined; // never repaired
+  }
+  if (opts.force !== true && typeof gate.at === "string") {
+    const post = postRepairUsageRows(sessionDir, gate.at);
+    if (post > 0) {
+      return {
+        filesRewritten: [],
+        rowsReverted: 0,
+        postRepairRows: post,
+        refused:
+          `${post} usage row(s) recorded after the repair have no pristine value to ` +
+          `restore; reverting would strand the transcript on two baselines and roll ` +
+          `meta.json back to its repair-time snapshot, discarding spend since then`,
+      };
+    }
   }
 
   const rewritten: string[] = [];
@@ -317,4 +404,94 @@ export function revertSession(sessionDir: string): RevertResult | undefined {
   writeFileAtomic(path, `${JSON.stringify(raw, null, 2)}\n`);
   log.debug(`reverted ${sessionDir}: ${reverted} rows`);
   return { filesRewritten: rewritten, rowsReverted: reverted };
+}
+
+export type ReshapeOutcome =
+  | { readonly kind: "ok"; readonly beforeCum: number; readonly beforeCur: number; readonly cum: number; readonly cur: number; readonly totalDelta: number }
+  | { readonly kind: "skip"; readonly why: "no-gate" | "single-upstream" | "already-correct" }
+  | { readonly kind: "refuse"; readonly why: string };
+
+/**
+ * Re-split an ALREADY-repaired session's cost ledger without touching its
+ * transcript.
+ *
+ * Repairs written before the split was understood collapsed the whole lifetime
+ * into `costAmount` and cleared `cumulativeCost`. That reads correct on disk,
+ * so a total-based audit will not find it, but it is a landmine: the next
+ * resurrect arms the ledger probe from `costAmount`, sees the agent's honest
+ * re-report of only the current upstream as a restart-at-$0, and banks the
+ * collapsed total on top of it. See `LedgerSplit`.
+ *
+ * Reshaping is deliberately narrower than revert-then-rerun. It rewrites two
+ * numbers in meta.json and nothing else, so a session whose generations were
+ * reconstructed by hand keeps them; a blanket revert would restore that
+ * session's truncated pre-reconstruction baseline instead.
+ *
+ * Idempotent: a session already in the right shape reports `already-correct`.
+ */
+export function reshapeSession(
+  sessionDir: string,
+  split: LedgerSplit,
+  toolVersion: string,
+  opts: { readonly dryRun?: boolean } = {},
+): ReshapeOutcome {
+  const path = resolve(sessionDir, "meta.json");
+  const meta = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  const bucket = (meta.extensionState as Record<string, Record<string, unknown>> | undefined)?.[
+    BUDGETER_NS
+  ];
+  const gate = bucket?.[REPAIR_KEY] as RepairGate | undefined;
+  if (gate === undefined) {
+    return { kind: "skip", why: "no-gate" };
+  }
+  if (split.perUpstream.length < 2) {
+    return { kind: "skip", why: "single-upstream" };
+  }
+  // Refuse rather than guess when the boundary is not drawable: splitLedger
+  // reports everything as `current` in that case, which is indistinguishable
+  // from a legitimately never-rotated session.
+  if (!split.perUpstream.some((p) => p.isCurrent)) {
+    return { kind: "refuse", why: "current upstream absent from the ledger" };
+  }
+
+  const usage = (meta.currentUsage as Record<string, unknown> | undefined) ?? {};
+  const beforeCum = typeof usage.cumulativeCost === "number" ? usage.cumulativeCost : 0;
+  const beforeCur = typeof usage.costAmount === "number" ? usage.costAmount : 0;
+  const wantCum = split.retired;
+  const wantCur = split.current;
+  if (Math.abs(beforeCum - wantCum) < 1e-6 && Math.abs(beforeCur - wantCur) < 1e-6) {
+    return { kind: "skip", why: "already-correct" };
+  }
+
+  // Write-once, like the gate's originalCurrentUsage: a second reshape must
+  // not capture the first one's output as the pristine value.
+  const state = meta.extensionState as Record<string, Record<string, unknown>>;
+  const nextGate: Record<string, unknown> = { ...gate };
+  if (nextGate.preReshapeCurrentUsage === undefined) {
+    nextGate.preReshapeCurrentUsage = meta.currentUsage;
+  }
+  nextGate.reshapedAt = new Date().toISOString();
+  nextGate.reshapeTool = toolString(toolVersion);
+
+  meta.currentUsage = {
+    ...usage,
+    costAmount: wantCur,
+    cumulativeCost: wantCum > 0 ? wantCum : undefined,
+  };
+  state[BUDGETER_NS] = { ...(state[BUDGETER_NS] ?? {}), [REPAIR_KEY]: nextGate };
+  meta.extensionState = state;
+  if (opts.dryRun !== true) {
+    writeFileAtomic(path, `${JSON.stringify(meta, null, 2)}\n`);
+    log.info(
+      `reshaped ${String(meta.sessionId)}: ${beforeCum}+${beforeCur} -> ${wantCum}+${wantCur}`,
+    );
+  }
+  return {
+    kind: "ok",
+    beforeCum,
+    beforeCur,
+    cum: wantCum,
+    cur: wantCur,
+    totalDelta: wantCum + wantCur - (beforeCum + beforeCur),
+  };
 }

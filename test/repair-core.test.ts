@@ -4,6 +4,7 @@ import {
   attribute,
   checkGuards,
   planSession,
+  splitLedger,
   truthAt,
   truthSeries,
   type CallIndex,
@@ -326,4 +327,86 @@ test("planSession totals meta from the full ledger, not the last recorded row", 
   if (!res.ok) return;
   assert.equal(res.plan.rows[0]!.repaired, 0.19, "the row itself is truth at its own instant");
   assert.ok(Math.abs(res.plan.trueTotal - 0.586) < 1e-9, `got ${res.plan.trueTotal}`);
+});
+
+// ---------------------------------------------------------------------------
+// splitLedger: the repaired total has to land in meta.json's TWO cost fields,
+// not be collapsed into costAmount. Getting this wrong is silent — the total
+// reads correct on disk and only double-counts on the next resurrect.
+// ---------------------------------------------------------------------------
+
+test("splitLedger puts retired upstreams in cumulativeCost and the current one in costAmount", () => {
+  const l = ledger({
+    old_a: [[100, 10]],
+    old_b: [[200, 25]],
+    cur: [[300, 7.5]],
+  });
+  const s = splitLedger(l, ["old_a", "old_b", "cur"], "cur");
+  assert.equal(s.retired, 35);
+  assert.equal(s.current, 7.5);
+  assert.equal(s.retired + s.current, 42.5);
+});
+
+test("splitLedger orders perUpstream ascending by first message and flags the current one", () => {
+  const l = ledger({ late: [[900, 1]], early: [[100, 2]], mid: [[500, 3]] });
+  const s = splitLedger(l, ["late", "early", "mid"], "late");
+  assert.deepEqual(
+    s.perUpstream.map((p) => p.upstreamSessionId),
+    ["early", "mid", "late"],
+  );
+  assert.deepEqual(
+    s.perUpstream.map((p) => p.isCurrent),
+    [false, false, true],
+  );
+  assert.equal(s.perUpstream[0]?.firstAt, 100);
+  assert.equal(s.perUpstream[2]?.cost, 1);
+});
+
+test("splitLedger: a single upstream that IS the current one has no retired spend", () => {
+  const s = splitLedger(ledger({ only: [[1, 5], [2, 6]] }), ["only"], "only");
+  assert.equal(s.retired, 0);
+  assert.equal(s.current, 11);
+});
+
+test("splitLedger refuses to guess when the current upstream is unknown", () => {
+  // No current upstream (or one absent from the ledger) means the boundary
+  // cannot be drawn honestly. Everything becomes `current`, which reproduces
+  // the pre-split behaviour rather than inventing a retired figure.
+  const l = ledger({ a: [[1, 4]], b: [[2, 6]] });
+  for (const cur of [undefined, "not_in_ledger"]) {
+    const s = splitLedger(l, ["a", "b"], cur);
+    assert.equal(s.retired, 0, `cur=${String(cur)}`);
+    assert.equal(s.current, 10, `cur=${String(cur)}`);
+  }
+});
+
+test("splitLedger total always equals truthAt over the same upstreams", () => {
+  const l = ledger({ a: [[1, 1.1]], b: [[2, 2.2]], c: [[3, 3.3]] });
+  const ups = ["a", "b", "c"];
+  const s = splitLedger(l, ups, "b");
+  const expected = truthAt(l, ups, Number.MAX_SAFE_INTEGER);
+  assert.ok(Math.abs(s.retired + s.current - expected) < 1e-9);
+});
+
+test("planSession carries a split whose halves reproduce trueTotal", () => {
+  const res = planSession(
+    session({
+      reportedTotal: 999,
+      usageRows: rows([[150, 999]]),
+      toolCalls: [tc("t_old"), tc("t_cur")],
+      currentUpstream: "cur",
+    }),
+    idx([
+      ["t_old", "old"],
+      ["t_cur", "cur"],
+    ]),
+    ledger({ old: [[10, 20]], cur: [[20, 5]] }),
+  );
+  assert.equal(res.ok, true);
+  if (!res.ok) {
+    return;
+  }
+  assert.equal(res.plan.trueTotal, 25);
+  assert.equal(res.plan.split.retired, 20);
+  assert.equal(res.plan.split.current, 5);
 });

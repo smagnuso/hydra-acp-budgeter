@@ -14,12 +14,13 @@ import {
   buildOpencodeIndex,
   defaultOpencodeDbs,
   listSessionDirs,
+  knownUpstreams,
   readGate,
   scanSession,
   type OpencodeIndex,
 } from "./repair-io.js";
-import { planSession, type RefusalReason, type RepairPlan } from "./repair-core.js";
-import { applyPlan, revertSession, ALGO_VERSION } from "./repair-write.js";
+import { planSession, splitLedger, type RefusalReason, type RepairPlan } from "./repair-core.js";
+import { applyPlan, revertSession, reshapeSession, ALGO_VERSION } from "./repair-write.js";
 
 export const REPAIR_HELP = `Usage: hydra-acp-budgeter repair [OPTIONS]
 
@@ -35,6 +36,11 @@ Dry-run by default — prints what would change and writes nothing.
 OPTIONS:
   --apply              Write the repair (requires the daemon to be stopped)
   --revert             Undo a previous repair, restoring the original values
+  --reshape            Re-split an already-repaired session's cost ledger into
+                       cumulativeCost (retired upstreams) + costAmount (current)
+                       without touching its transcript. Fixes repairs written
+                       before the split existed, whose collapsed shape makes the
+                       next resurrect double-count the current upstream.
   --session <id>       Limit to one session (repeatable)
   --limit <n>          Process at most n sessions, largest inflation first
   --report <path>      Write a JSON report of the plan
@@ -49,6 +55,12 @@ SAFETY
   * A repaired session is gated in meta.json and will not be repaired twice;
     to redo it, --revert first.
   * Sessions that cannot be proven are refused, never guessed at.
+  * --revert refuses a session that recorded usage after its repair: those rows
+    have no pristine value to restore, so the undo cannot be lossless. --force
+    accepts the loss.
+  * --reshape is idempotent and shape-only: for a session whose total is
+    already right it moves money between the two fields and changes no total.
+    The pre-reshape currentUsage is stamped write-once into the gate.
 `;
 
 interface Options {
@@ -60,6 +72,7 @@ interface Options {
   json: boolean;
   force: boolean;
   skipWarm: boolean;
+  reshape: boolean;
 }
 
 function parseArgs(argv: string[]): Options | undefined {
@@ -72,11 +85,13 @@ function parseArgs(argv: string[]): Options | undefined {
     json: false,
     force: false,
     skipWarm: false,
+    reshape: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === "--apply") o.apply = true;
     else if (a === "--revert") o.revert = true;
+    else if (a === "--reshape") o.reshape = true;
     else if (a === "--json") o.json = true;
     else if (a === "--force") o.force = true;
     else if (a === "--skip-warm") o.skipWarm = true;
@@ -91,6 +106,10 @@ function parseArgs(argv: string[]): Options | undefined {
   }
   if (o.apply && o.revert) {
     process.stderr.write(`repair: --apply and --revert are mutually exclusive\n`);
+    process.exit(2);
+  }
+  if (o.reshape && o.revert) {
+    process.stderr.write(`repair: --reshape and --revert are mutually exclusive\n`);
     process.exit(2);
   }
   return o;
@@ -225,7 +244,7 @@ export async function runRepair(argv: string[]): Promise<void> {
     warm = ids;
     process.stderr.write(`skipping ${warm.size} warm session(s) held by the running daemon\n`);
   }
-  if (opts.apply || opts.revert) {
+  if (opts.apply || opts.revert || opts.reshape) {
     const state = daemonState();
     if (state === "up" && opts.skipWarm && !opts.force) {
       // Repairing cold sessions with the daemon up is safe: it holds no
@@ -255,16 +274,27 @@ export async function runRepair(argv: string[]): Promise<void> {
   if (opts.revert) {
     let n = 0;
     let rows = 0;
+    let refusedN = 0;
     for (const dir of dirs) {
       if (warm.size > 0 && warm.has(basename(dir))) continue;
-      const r = revertSession(dir);
-      if (r) {
-        n += 1;
-        rows += r.rowsReverted;
-        process.stdout.write(`reverted ${basename(dir)}  (${r.rowsReverted} rows)\n`);
+      const r = revertSession(dir, { force: opts.force });
+      if (!r) continue;
+      if (r.refused !== undefined) {
+        refusedN += 1;
+        process.stdout.write(`refused  ${basename(dir)}  ${r.refused}\n`);
+        continue;
       }
+      n += 1;
+      rows += r.rowsReverted;
+      process.stdout.write(`reverted ${basename(dir)}  (${r.rowsReverted} rows)\n`);
     }
     process.stdout.write(`\n${n} session(s) reverted, ${rows} rows restored.\n`);
+    if (refusedN > 0) {
+      process.stdout.write(
+        `${refusedN} session(s) refused: they kept working after their repair, so a\n` +
+          `revert would lose spend recorded since. Use --force to accept that.\n`,
+      );
+    }
     return;
   }
 
@@ -272,6 +302,54 @@ export async function runRepair(argv: string[]): Promise<void> {
   if (dbs.length === 0) {
     process.stderr.write(`repair: no OpenCode database found; nothing to reconcile against.\n`);
     process.exit(1);
+  }
+
+  if (opts.reshape) {
+    process.stderr.write(`indexing ${dbs.length} OpenCode database(s)…\n`);
+    const idx: OpencodeIndex = buildOpencodeIndex(dbs);
+    let fixed = 0;
+    let skipped = 0;
+    let refusedN = 0;
+    let delta = 0;
+    for (const dir of dirs) {
+      const scanned = scanSession(dir);
+      if (scanned === undefined) continue;
+      if (warm.size > 0 && warm.has(scanned.input.sessionId)) continue;
+      const gate = readGate(scanned.meta);
+      if (gate === undefined) continue;
+      // Full ancestry, not just the gate: a session resurrected after its
+      // repair has a current upstream the gate never recorded, and one whose
+      // generations were reconstructed by hand knows more than the gate does.
+      // See knownUpstreams.
+      const ups = knownUpstreams(scanned.meta);
+      if (ups.length === 0) continue;
+      const split = splitLedger(idx.ledger, ups, scanned.meta.upstreamSessionId);
+      const out = reshapeSession(dir, split, readToolVersion(), { dryRun: !opts.apply });
+      if (out.kind === "refuse") {
+        refusedN += 1;
+        process.stdout.write(`refused  ${scanned.input.sessionId}  ${out.why}\n`);
+        continue;
+      }
+      if (out.kind === "skip") {
+        skipped += 1;
+        continue;
+      }
+      fixed += 1;
+      delta += out.totalDelta;
+      process.stdout.write(
+        `${opts.apply ? "reshaped" : "would reshape"} ${scanned.input.sessionId}  ` +
+          `${out.beforeCum.toFixed(2)}+${out.beforeCur.toFixed(2)} -> ` +
+          `${out.cum.toFixed(2)}+${out.cur.toFixed(2)}` +
+          (Math.abs(out.totalDelta) > 0.005 ? `  total ${out.totalDelta > 0 ? "+" : ""}${out.totalDelta.toFixed(2)}` : ``) +
+          `\n`,
+      );
+    }
+    process.stdout.write(
+      `\n${fixed} session(s) ${opts.apply ? "reshaped" : "to reshape"}, ${skipped} already correct, ${refusedN} refused.\n` +
+        (opts.apply ? `` : `dry run — nothing written. Re-run with --apply.\n`) +
+        `net total change $${delta.toFixed(2)} (shape-only for sessions whose total was already right)\n`,
+    );
+    return;
   }
   process.stderr.write(`indexing ${dbs.length} OpenCode database(s)…\n`);
   const index: OpencodeIndex = buildOpencodeIndex(dbs);
