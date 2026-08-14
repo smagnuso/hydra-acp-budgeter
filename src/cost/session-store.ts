@@ -92,8 +92,33 @@ function readMetaJson(sessionPath: string): SessionRecord | undefined {
   }
 
   // cwd — realpath-normalize when present and absolute; leave as-is otherwise.
+  //
+  // Attribute an isolated session to its SOURCE tree, not to the
+  // workspace it physically ran in. A workspace lives outside the repo
+  // (under ~/.hydra-acp/workspaces/<hash>/) and shares no path prefix
+  // with it, so without this remap `--dir <repo>` matches nothing for
+  // those sessions and their spend silently vanishes from the project's
+  // total. Orchestrated runs are both the heaviest spenders and the
+  // reason workspaces exist, so per-project cost would under-report
+  // worst exactly when it matters most.
+  //
+  // It also outlives cleanup. Workspaces are removed when their session
+  // is, and realpathCached below yields undefined for a path that no
+  // longer exists, after which directory filtering skips the record
+  // entirely. Attributing to the workspace would therefore lose the
+  // spend permanently the moment cleanup ran; the source tree persists.
+  //
+  // Doing it here, at ingest, is deliberate: both the directory filter
+  // and the grouping label downstream read this single `cwd`, so one
+  // remap fixes both and neither has to learn about workspaces.
   let cwd: string | undefined;
-  const rawCwd = typeof obj.cwd === "string" ? obj.cwd : undefined;
+  const workspace =
+    typeof obj.workspace === "object" && obj.workspace !== null
+      ? (obj.workspace as Record<string, unknown>)
+      : undefined;
+  const sourceCwd =
+    typeof workspace?.sourceCwd === "string" ? workspace.sourceCwd : undefined;
+  const rawCwd = sourceCwd ?? (typeof obj.cwd === "string" ? obj.cwd : undefined);
   if (rawCwd !== undefined) {
     if (isAbsolute(rawCwd)) {
       const resolved = realpathCached(rawCwd);

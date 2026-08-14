@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test, afterEach } from "node:test";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { scanSessions, sessionsDir } from "../src/cost/session-store.js";
@@ -452,6 +452,138 @@ test("scanSessions leaves legacy collapsed totals unchanged", () => {
       } else {
         process.env.HYDRA_ACP_HOME = env;
       }
+    }
+  });
+});
+
+// Attribution tests use REAL directories: scanSessions realpath-resolves
+// an absolute cwd and yields undefined when the path does not exist, so
+// fictional paths would silently read as "no cwd" and prove nothing.
+function realDir(label: string): string {
+  return mkdtempSync(resolve(tmpdir(), `budgeter-${label}-`));
+}
+
+test("attributes an isolated session's spend to its source tree, not its workspace", () => {
+  // Regression guard for silent under-reporting. An isolated session runs
+  // in a workspace OUTSIDE the repo, so a record carrying only the
+  // workspace path drops out of `--dir <repo>` entirely. Orchestrated
+  // runs are the heaviest spenders and the ones that get isolated, so
+  // this is where per-project cost would be most wrong.
+  const sourceDir = realDir("source");
+  const wsDir = realDir("workspace");
+  withTempSessionStore((sessionsPath) => {
+    const env = process.env.HYDRA_ACP_HOME;
+    try {
+      process.env.HYDRA_ACP_HOME = resolve(sessionsPath, "..");
+      writeMeta(sessionsPath, "sess_isolated", {
+        sessionId: "sess_isolated",
+        // cwd is the workspace: that is where the agent actually ran.
+        cwd: wsDir,
+        workspace: {
+          path: wsDir,
+          sourceCwd: sourceDir,
+          label: "featureA",
+          provider: "git",
+        },
+        agentId: "agent_a",
+        interactive: true,
+        currentUsage: { costAmount: 4.25, costCurrency: "USD" },
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-06-16T00:00:00.000Z",
+      });
+
+      const records = scanSessions();
+      assert.equal(records.length, 1);
+      assert.equal(records[0].cwd, realpathSync(sourceDir));
+      assert.notEqual(records[0].cwd, realpathSync(wsDir));
+      assert.equal(records[0].costAmount, 4.25);
+    } finally {
+      if (env === undefined) {
+        delete process.env.HYDRA_ACP_HOME;
+      } else {
+        process.env.HYDRA_ACP_HOME = env;
+      }
+      rmSync(sourceDir, { recursive: true, force: true });
+      rmSync(wsDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("still attributes spend after the workspace directory is gone", () => {
+  // Workspaces are removed when their session is; source trees are not.
+  // Attributing to the workspace would make the spend unresolvable the
+  // moment cleanup ran, since a vanished path realpaths to undefined and
+  // is then skipped by directory filtering altogether.
+  const sourceDir = realDir("source-persist");
+  const wsDir = realDir("workspace-gone");
+  rmSync(wsDir, { recursive: true, force: true });
+  withTempSessionStore((sessionsPath) => {
+    const env = process.env.HYDRA_ACP_HOME;
+    try {
+      process.env.HYDRA_ACP_HOME = resolve(sessionsPath, "..");
+      writeMeta(sessionsPath, "sess_gone_ws", {
+        sessionId: "sess_gone_ws",
+        cwd: wsDir,
+        workspace: { path: wsDir, sourceCwd: sourceDir, label: "old", provider: "git" },
+        agentId: "agent_a",
+        interactive: true,
+        currentUsage: { costAmount: 9.0, costCurrency: "USD" },
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-06-16T00:00:00.000Z",
+      });
+
+      const records = scanSessions();
+      assert.equal(records[0].cwd, realpathSync(sourceDir));
+      assert.equal(records[0].costAmount, 9.0);
+    } finally {
+      if (env === undefined) {
+        delete process.env.HYDRA_ACP_HOME;
+      } else {
+        process.env.HYDRA_ACP_HOME = env;
+      }
+      rmSync(sourceDir, { recursive: true, force: true });
+    }
+  });
+});
+
+test("leaves a non-isolated session's cwd alone, and tolerates a malformed workspace block", () => {
+  const plainDir = realDir("plain");
+  withTempSessionStore((sessionsPath) => {
+    const env = process.env.HYDRA_ACP_HOME;
+    try {
+      process.env.HYDRA_ACP_HOME = resolve(sessionsPath, "..");
+      writeMeta(sessionsPath, "sess_plain", {
+        sessionId: "sess_plain",
+        cwd: plainDir,
+        agentId: "agent_a",
+        interactive: true,
+        currentUsage: { costAmount: 1.0, costCurrency: "USD" },
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-06-16T00:00:00.000Z",
+      });
+      writeMeta(sessionsPath, "sess_bad_ws", {
+        sessionId: "sess_bad_ws",
+        cwd: plainDir,
+        workspace: "not-an-object",
+        agentId: "agent_a",
+        interactive: true,
+        currentUsage: { costAmount: 2.0, costCurrency: "USD" },
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-06-16T00:00:00.000Z",
+      });
+
+      const records = scanSessions();
+      const expected = realpathSync(plainDir);
+      for (const r of records) {
+        assert.equal(r.cwd, expected);
+      }
+    } finally {
+      if (env === undefined) {
+        delete process.env.HYDRA_ACP_HOME;
+      } else {
+        process.env.HYDRA_ACP_HOME = env;
+      }
+      rmSync(plainDir, { recursive: true, force: true });
     }
   });
 });
