@@ -159,6 +159,13 @@ export function renderText(agg: CostAggregate, opts: RenderOptions = {}): string
       }
       return `${formatLoc(net)} lines`;
     }
+    if (useTokens) {
+      let tokens = 0;
+      for (const it of rowsForLoc) {
+        tokens += tokenSum(it);
+      }
+      return `${humanizeTokens(tokens)} tokens`;
+    }
     return formatCost(cost);
   };
 
