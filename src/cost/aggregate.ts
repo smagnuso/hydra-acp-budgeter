@@ -672,27 +672,82 @@ export function aggregate(
     return a.bucket.localeCompare(b.bucket);
   };
 
+  // Per-session events, sorted by ts, shared by every case below. A
+  // session's first event is a cumulative baseline, not a delta — we don't
+  // know how that pre-existing spend was distributed in time, so cost only
+  // accrues from the second event onward (see the fallback note below for
+  // sessions with fewer than two events).
+  const filteredById = new Map<string, SessionRecord>();
+  for (const r of filtered) {
+    filteredById.set(r.sessionId, r);
+  }
+
+  const eventsBySession = new Map<string, CostEvent[]>();
+  if (events !== undefined) {
+    for (const ev of events) {
+      if (!filteredById.has(ev.sessionId)) {
+        continue;
+      }
+      const list = eventsBySession.get(ev.sessionId);
+      if (list === undefined) {
+        eventsBySession.set(ev.sessionId, [ev]);
+      } else {
+        list.push(ev);
+      }
+    }
+    for (const list of eventsBySession.values()) {
+      list.sort((a, b) => a.ts.localeCompare(b.ts));
+    }
+  }
+
   // -----------------------------------------------------------------------
   // Case 1: No grouping, no bucketing (e.g. --since only)
   // -----------------------------------------------------------------------
   if (opts.by === undefined && opts.bucket === undefined) {
     let totalCost = 0;
-    let totalDelta = 0;
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     let totalCacheReadTokens = 0;
     let totalCacheWriteTokens = 0;
+    let contributingSessions = 0;
 
     for (const r of filtered) {
-      totalCost += r.costAmount;
+      // Sum in-window cost deltas from per-turn events when available.
+      // Sessions with fewer than two events have no measurable delta —
+      // fall back to their lifetime cost, same as the zero-event fallback
+      // documented for the bucketed cases below.
+      const sessionEvents = eventsBySession.get(r.sessionId);
 
-      const evts = eventMap.get(r.sessionId);
+      if (sessionEvents === undefined || sessionEvents.length < 2) {
+        totalCost += r.costAmount;
+        contributingSessions++;
+      } else {
+        const first = sessionEvents[0] as CostEvent;
+        let prev = first.cumulativeCost;
+        let contributed = false;
 
-      if (evts !== undefined) {
-        for (const ev of evts) {
-          totalDelta += ev.deltaCost;
+        for (let i = 1; i < sessionEvents.length; i++) {
+          const ev = sessionEvents[i];
+          if (ev === undefined) continue;
+          const delta = Math.max(0, ev.cumulativeCost - prev);
+          prev = ev.cumulativeCost;
+          if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) {
+            continue;
+          }
+          totalCost += delta;
+          contributed = true;
+        }
 
-          if (opts.tokens === true) {
+        if (contributed) {
+          contributingSessions++;
+        }
+      }
+
+      if (opts.tokens === true) {
+        const evts = eventMap.get(r.sessionId);
+
+        if (evts !== undefined) {
+          for (const ev of evts) {
             if (ev.inputTokens !== undefined) totalInputTokens += ev.inputTokens;
             if (ev.outputTokens !== undefined) totalOutputTokens += ev.outputTokens;
             if (ev.cacheReadTokens !== undefined) totalCacheReadTokens += ev.cacheReadTokens;
@@ -702,7 +757,7 @@ export function aggregate(
       }
     }
 
-    const row: AggregateRow = { label: "All sessions", costAmount: totalCost, deltaCost: totalDelta, sessionCount: filtered.length };
+    const row: AggregateRow = { label: "All sessions", costAmount: totalCost, deltaCost: totalCost, sessionCount: contributingSessions };
 
     if (opts.tokens === true) {
       row.inputTokens = totalInputTokens;
@@ -734,22 +789,19 @@ export function aggregate(
 
   // -----------------------------------------------------------------------
   // Case 2: Grouping without bucketing (--by dir/session/model/agent)
-  // This was the unreachable branch — now fixed.
   // -----------------------------------------------------------------------
   if (opts.by !== undefined && opts.bucket === undefined) {
-    const groupsMap = new Map<string, { label: string; rows: AggregateRow }>();
+    const groupsMap = new Map<string, { label: string; rows: AggregateRow; sessions: Set<string> }>();
 
     for (const r of filtered) {
       const key = groupKey(r);
       let grp = groupsMap.get(key);
 
       if (grp === undefined) {
-        grp = { label: key, rows: { label: key, costAmount: 0, deltaCost: 0, sessionCount: 0 } };
+        grp = { label: key, rows: { label: key, costAmount: 0, deltaCost: 0, sessionCount: 0 }, sessions: new Set() };
         groupsMap.set(key, grp);
       }
 
-      grp.rows.costAmount += r.costAmount;
-      grp.rows.sessionCount = (grp.rows.sessionCount ?? 0) + 1;
       if (opts.tokens === true) {
         if (grp.rows.inputTokens === undefined) grp.rows.inputTokens = 0;
         grp.rows.inputTokens += r.contextTokens;
@@ -769,14 +821,44 @@ export function aggregate(
         }
       }
 
-      // Sum deltas and tokens from events when available.
-      const evts = eventMap.get(r.sessionId);
+      // Sum in-window cost deltas from per-turn events when available.
+      // Sessions with fewer than two events have no measurable delta —
+      // fall back to their lifetime cost, same as Case 1 above.
+      const sessionEvents = eventsBySession.get(r.sessionId);
 
-      if (evts !== undefined) {
-        for (const ev of evts) {
-          grp.rows.deltaCost! += ev.deltaCost;
+      if (sessionEvents === undefined || sessionEvents.length < 2) {
+        grp.rows.costAmount += r.costAmount;
+        grp.rows.deltaCost! += r.costAmount;
+        grp.sessions.add(r.sessionId);
+      } else {
+        const first = sessionEvents[0] as CostEvent;
+        let prev = first.cumulativeCost;
+        let contributed = false;
 
-          if (opts.tokens === true) {
+        for (let i = 1; i < sessionEvents.length; i++) {
+          const ev = sessionEvents[i];
+          if (ev === undefined) continue;
+          const delta = Math.max(0, ev.cumulativeCost - prev);
+          prev = ev.cumulativeCost;
+          if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) {
+            continue;
+          }
+          grp.rows.costAmount += delta;
+          grp.rows.deltaCost! += delta;
+          contributed = true;
+        }
+
+        if (contributed) {
+          grp.sessions.add(r.sessionId);
+        }
+      }
+
+      // Sum tokens from events when available.
+      if (opts.tokens === true) {
+        const evts = eventMap.get(r.sessionId);
+
+        if (evts !== undefined) {
+          for (const ev of evts) {
             if (grp.rows.inputTokens === undefined) grp.rows.inputTokens = 0;
             if (grp.rows.outputTokens === undefined) grp.rows.outputTokens = 0;
             if (grp.rows.cacheReadTokens === undefined) grp.rows.cacheReadTokens = 0;
@@ -794,42 +876,18 @@ export function aggregate(
     const groups: Group<AggregateRow>[] = [];
 
     for (const grp of groupsMap.values()) {
-      groups.push({ label: grp.label, items: [grp.rows], sessionCount: grp.rows.sessionCount });
+      grp.rows.sessionCount = grp.sessions.size;
+      groups.push({ label: grp.label, items: [grp.rows], sessionCount: grp.sessions.size });
     }
 
     return { kind: "grouped", groups, currency };
   }
 
-  // Time-bucketed cases use per-turn usage_update events when available.
-  // Each event carries a cumulative-cost snapshot; per-session delta =
-  // max(0, current - previous). Falls back to lump-at-updatedAt for
-  // sessions that have no events (legacy / pre-T1 sessions). Sessions
-  // are looked up by id; events with no matching record are skipped
-  // (they were filtered out — out of dir/interactive scope).
-  const filteredById = new Map<string, SessionRecord>();
-  for (const r of filtered) {
-    filteredById.set(r.sessionId, r);
-  }
-
-  // Group events by sessionId, sorted by ts ascending (the daemon's
-  // /v1/sessions/events endpoint already sorts but we don't rely on it).
-  const eventsBySession = new Map<string, CostEvent[]>();
-  if (events !== undefined) {
-    for (const ev of events) {
-      if (!filteredById.has(ev.sessionId)) {
-        continue;
-      }
-      const list = eventsBySession.get(ev.sessionId);
-      if (list === undefined) {
-        eventsBySession.set(ev.sessionId, [ev]);
-      } else {
-        list.push(ev);
-      }
-    }
-    for (const list of eventsBySession.values()) {
-      list.sort((a, b) => a.ts.localeCompare(b.ts));
-    }
-  }
+  // Time-bucketed cases (3/4 below) reuse the filteredById/eventsBySession
+  // maps built above Case 1. Per-session delta = max(0, current - previous);
+  // sessions with no events fall back to lump-at-updatedAt (legacy /
+  // pre-T1 sessions). Events with no matching record are skipped (they
+  // were filtered out — out of dir/interactive scope).
 
   // Per-bucket session-id tracking so sessionCount counts unique
   // sessions per bucket (a session spanning N buckets contributes 1 to

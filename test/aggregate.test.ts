@@ -116,11 +116,34 @@ test("aggregate fast path ignores events", () => {
   assert.equal((result as any).row.costAmount, 10);
 });
 
-test("aggregate with --since: sums costAmount + deltaCost", () => {
-  const result = aggregate([makeSession({ sessionId: "a", costAmount: 1.0, updatedAt: "2026-06-16T00:00:00.000Z" }), makeSession({ sessionId: "b", costAmount: 2.0, updatedAt: "2024-01-01T00:00:00.000Z" })], [makeEvent({ sessionId: "a", deltaCost: 0.3, ts: "2026-06-15T12:00:00.000Z" })], { since: new Date("2025-04-01T00:00:00.000Z") });
+test("aggregate with --since: uses in-window delta from events, not lifetime costAmount", () => {
+  const result = aggregate(
+    [
+      makeSession({ sessionId: "a", costAmount: 1.0, updatedAt: "2026-06-16T00:00:00.000Z" }),
+      makeSession({ sessionId: "b", costAmount: 2.0, updatedAt: "2024-01-01T00:00:00.000Z" }),
+    ],
+    [
+      makeEvent({ sessionId: "a", cumulativeCost: 0.5, ts: "2026-06-10T00:00:00.000Z" }),
+      makeEvent({ sessionId: "a", cumulativeCost: 1.0, ts: "2026-06-15T12:00:00.000Z" }),
+    ],
+    { since: new Date("2025-04-01T00:00:00.000Z") },
+  );
+  assert.equal(result.kind, "total");
+  assert.equal((result as any).row.costAmount, 0.5);
+  assert.equal((result as any).row.deltaCost, 0.5);
+  assert.equal((result as any).row.sessionCount, 1);
+});
+
+test("aggregate with --since: sessions with fewer than two events fall back to lifetime costAmount", () => {
+  const result = aggregate(
+    [makeSession({ sessionId: "a", costAmount: 1.0, updatedAt: "2026-06-16T00:00:00.000Z" })],
+    [makeEvent({ sessionId: "a", cumulativeCost: 1.0, ts: "2026-06-15T12:00:00.000Z" })],
+    { since: new Date("2025-04-01T00:00:00.000Z") },
+  );
   assert.equal(result.kind, "total");
   assert.equal((result as any).row.costAmount, 1.0);
-  assert.equal((result as any).row.deltaCost, 0.3);
+  assert.equal((result as any).row.deltaCost, 1.0);
+  assert.equal((result as any).row.sessionCount, 1);
 });
 
 test("aggregate with --since and --tokens: includes token totals", () => {
@@ -174,12 +197,12 @@ test("aggregate grouped with --tokens: includes token totals from events", () =>
   const a = grouped.groups.find(g => g.label === "a");
   assert.ok(a);
   assert.equal(a!.items[0].costAmount, 1.0);
-  assert.equal(a!.items[0].deltaCost, 0.1);
+  assert.equal(a!.items[0].deltaCost, 1.0);
   assert.equal(a!.items[0].inputTokens, 100);
   const b = grouped.groups.find(g => g.label === "b");
   assert.ok(b);
   assert.equal(b!.items[0].costAmount, 2.0);
-  assert.equal(b!.items[0].deltaCost, 0.2);
+  assert.equal(b!.items[0].deltaCost, 2.0);
   assert.equal(b!.items[0].inputTokens, 200);
 });
 
@@ -404,12 +427,19 @@ test("aggregate with --no-interactive filter", () => {
   assert.equal((result as any).row.costAmount, 1.0);
 });
 
-test("aggregate grouped uses deltaCost from events when available", () => {
-  const result = aggregate([makeSession({ sessionId: "a", costAmount: 10.0 })], [makeEvent({ sessionId: "a", deltaCost: 0.5, ts: "2026-06-15T12:00:00.000Z" })], { by: "session" });
+test("aggregate grouped uses in-window delta from events when available", () => {
+  const result = aggregate(
+    [makeSession({ sessionId: "a", costAmount: 10.0 })],
+    [
+      makeEvent({ sessionId: "a", cumulativeCost: 9.5, ts: "2026-06-10T00:00:00.000Z" }),
+      makeEvent({ sessionId: "a", cumulativeCost: 10.0, ts: "2026-06-15T12:00:00.000Z" }),
+    ],
+    { by: "session" },
+  );
   assert.equal(result.kind, "grouped");
   const grouped = result as Extract<typeof result, { kind: "grouped" }>;
   const sg = grouped.groups.find(g => g.label === "a");
-  assert.ok(sg); assert.equal(sg!.items[0].costAmount, 10.0); assert.equal(sg!.items[0].deltaCost, 0.5);
+  assert.ok(sg); assert.equal(sg!.items[0].costAmount, 0.5); assert.equal(sg!.items[0].deltaCost, 0.5);
 });
 
 test("aggregate grouped: sessions without events still appear with costAmount", () => {
@@ -418,7 +448,7 @@ test("aggregate grouped: sessions without events still appear with costAmount", 
   const grouped = result as Extract<typeof result, { kind: "grouped" }>;
   const sg = grouped.groups.find(g => g.label === "a");
   assert.ok(sg); assert.equal(sg!.items[0].costAmount, 1.0);
-  assert.ok(sg!.items[0].deltaCost === undefined || sg!.items[0].deltaCost === 0);
+  assert.equal(sg!.items[0].deltaCost, 1.0);
 });
 
 test("aggregate timeSeries: sessions without events are omitted from buckets", () => {

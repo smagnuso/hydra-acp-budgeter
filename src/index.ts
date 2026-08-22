@@ -231,10 +231,12 @@ async function runCost(argv: string[]): Promise<void> {
         host: host ?? "local",
     });
 
-    // Fetch per-turn usage events from the daemon when a bucket view is
-    // requested. Each event carries cumulative cost + ts; the aggregator
-    // diffs them per session for proper time-bucketing instead of lumping
-    // each session's full cost at meta.updatedAt.
+    // Fetch per-turn usage events from the daemon. Each event carries
+    // cumulative cost + ts; the aggregator diffs them per session for
+    // proper windowing instead of lumping each session's full lifetime
+    // cost at meta.updatedAt. Every non-fast-path aggregate() case (Case
+    // 1/2 totals-and-groups included, not just the bucketed views) needs
+    // this to report in-window spend rather than lifetime spend.
     //
     // NOTE: we deliberately do NOT pass `since` to the daemon here. The
     // daemon's `since` filter cuts events at the window boundary, which
@@ -243,18 +245,16 @@ async function runCost(argv: string[]): Promise<void> {
     // The aggregator's bucketKey + records.updatedAt pre-filter already
     // handles window slicing on its end.
     let events: CostEvent[] | undefined = undefined;
-    if (bucket !== undefined) {
-        const wireEvents = await fetchUsageEventsFromDaemon();
-        if (wireEvents !== undefined) {
-            events = wireEvents.map((e) => ({
-                sessionId: e.sessionId,
-                ts: e.ts,
-                deltaCost: 0,
-                cumulativeCost: e.costCumulative,
-                currency: e.costCurrency,
-                inputTokens: e.contextTokens,
-            }));
-        }
+    const wireEvents = await fetchUsageEventsFromDaemon();
+    if (wireEvents !== undefined) {
+        events = wireEvents.map((e) => ({
+            sessionId: e.sessionId,
+            ts: e.ts,
+            deltaCost: 0,
+            cumulativeCost: e.costCumulative,
+            currency: e.costCurrency,
+            inputTokens: e.contextTokens,
+        }));
     }
 
     // For time-bucketed LOC views, stream EditEvents (with timestamps) for
