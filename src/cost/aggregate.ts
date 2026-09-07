@@ -1,4 +1,4 @@
-import { relative, resolve } from "node:path";
+import { relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
 import { realpathSync } from "node:fs";
 import type { SessionRecord } from "./session-store.js";
@@ -223,7 +223,12 @@ export function applyFilters(
         continue;
       }
 
-      if (r.cwd.startsWith(filterRoot + "/") || r.cwd === filterRoot) {
+      // sep, not "/": the trailing separator is what stops
+      // .../myapp from matching .../myapp-other, and on Windows a
+      // hardcoded forward slash never matches, so the boundary check
+      // silently degrades to "equal only" and every subdirectory of the
+      // filtered dir disappears from the results.
+      if (r.cwd === filterRoot || r.cwd.startsWith(filterRoot + sep)) {
         filtered.push(r);
       }
     }
