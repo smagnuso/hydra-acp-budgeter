@@ -1,7 +1,7 @@
 {
   "name": "@hydra-acp/budgeter",
   "version": "0.1.19",
-  "description": "Cost-budget transformer extension for hydra-acp — warns on soft limit, rejects further prompts/sessions on hard limit.",
+  "description": "Cost-budget transformer extension for hydra-acp \u2014 warns on soft limit, rejects further prompts/sessions on hard limit.",
   "license": "MIT",
   "type": "module",
   "publishConfig": {
@@ -22,12 +22,12 @@
     "watch": "tsup --watch",
     "start": "node dist/index.js",
     "dev": "tsup && node dist/index.js",
-    "test": "node --test --import tsx 'test/**/*.test.ts'",
+    "test": "node scripts/run-tests.mjs",
     "lint": "tsc -p . --noEmit",
     "prepublishOnly": "npm run build && npm test"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5.0"
   },
   "dependencies": {
     "ws": "^8.20.0"
