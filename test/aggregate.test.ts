@@ -1,10 +1,15 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
+// Fixture paths are built natively: applyFilters resolve()s its dir
+// filter, and on Windows a literal join(HOME, "...") resolves to a
+// drive-rooted path that no longer matches a record left POSIX-spelled.
+import { join, resolve as resolvePath } from "node:path";
+const HOME = resolvePath("/home/user");
 import { parseSince, applyFilters, aggregate, type AggregateOptions, type FilterOptions, type CostEvent } from "../src/cost/aggregate.js";
 import type { SessionRecord } from "../src/cost/session-store.js";
 
 function makeSession(overrides: Partial<SessionRecord> & { sessionId?: string }): SessionRecord {
-  const cwd = "cwd" in overrides ? overrides.cwd : "/home/user/projects/myapp";
+  const cwd = "cwd" in overrides ? overrides.cwd : join(HOME, "projects/myapp");
   const agentId = "agentId" in overrides ? overrides.agentId : "agent_a";
   const model = "model" in overrides ? overrides.model : "claude-sonnet-4-20250514";
   const interactive = "interactive" in overrides ? overrides.interactive : true;
@@ -66,12 +71,12 @@ test("applyFilters drops sessions before since date", () => {
 
 test("applyFilters dir prefix-match with trailing-slash safety", () => {
   const records = [
-    makeSession({ sessionId: "a", cwd: "/home/user/projects/myapp" }),
-    makeSession({ sessionId: "b", cwd: "/home/user/projects/myapp-other" }),
-    makeSession({ sessionId: "c", cwd: "/home/user/projects/myapp/sub/deep" }),
+    makeSession({ sessionId: "a", cwd: join(HOME, "projects/myapp") }),
+    makeSession({ sessionId: "b", cwd: join(HOME, "projects/myapp-other") }),
+    makeSession({ sessionId: "c", cwd: join(HOME, "projects/myapp/sub/deep") }),
     makeSession({ sessionId: "d", cwd: undefined }),
   ];
-  const result = applyFilters(records, { dir: "/home/user/projects/myapp" });
+  const result = applyFilters(records, { dir: join(HOME, "projects/myapp") });
   assert.equal(result.length, 2);
   assert.ok(result.some(r => r.sessionId === "a"));
   assert.ok(result.some(r => r.sessionId === "c"));
@@ -80,7 +85,7 @@ test("applyFilters dir prefix-match with trailing-slash safety", () => {
 });
 
 test("applyFilters exact dir match", () => {
-  const result = applyFilters([makeSession({ sessionId: "a", cwd: "/home/user/projects/myapp" })], { dir: "/home/user/projects/myapp" });
+  const result = applyFilters([makeSession({ sessionId: "a", cwd: join(HOME, "projects/myapp") })], { dir: join(HOME, "projects/myapp") });
   assert.equal(result.length, 1);
 });
 
@@ -94,11 +99,11 @@ test("applyFilters interactive filter", () => {
 
 test("applyFilters combines all filters", () => {
   const records = [
-    makeSession({ sessionId: "a", cwd: "/home/user/projects/myapp", updatedAt: "2025-01-01T00:00:00.000Z", interactive: true }),
-    makeSession({ sessionId: "b", cwd: "/home/user/projects/myapp", updatedAt: "2026-06-16T00:00:00.000Z", interactive: false }),
-    makeSession({ sessionId: "c", cwd: "/home/user/projects/other", updatedAt: "2026-06-16T00:00:00.000Z", interactive: true }),
+    makeSession({ sessionId: "a", cwd: join(HOME, "projects/myapp"), updatedAt: "2025-01-01T00:00:00.000Z", interactive: true }),
+    makeSession({ sessionId: "b", cwd: join(HOME, "projects/myapp"), updatedAt: "2026-06-16T00:00:00.000Z", interactive: false }),
+    makeSession({ sessionId: "c", cwd: join(HOME, "projects/other"), updatedAt: "2026-06-16T00:00:00.000Z", interactive: true }),
   ];
-  const result = applyFilters(records, { since: new Date("2025-04-01T00:00:00.000Z"), dir: "/home/user/projects/myapp", interactive: false });
+  const result = applyFilters(records, { since: new Date("2025-04-01T00:00:00.000Z"), dir: join(HOME, "projects/myapp"), interactive: false });
   assert.equal(result.length, 1);
   assert.equal(result[0].sessionId, "b");
 });
@@ -154,12 +159,12 @@ test("aggregate with --since and --tokens: includes token totals", () => {
 });
 
 test("aggregate grouped by dir: creates kind=grouped output", () => {
-  const result = aggregate([makeSession({ sessionId: "a", cwd: "/home/user/projects/myapp", costAmount: 1.0 }), makeSession({ sessionId: "b", cwd: "/home/user/projects/other", costAmount: 2.0 })], undefined, { by: "dir" });
+  const result = aggregate([makeSession({ sessionId: "a", cwd: join(HOME, "projects/myapp"), costAmount: 1.0 }), makeSession({ sessionId: "b", cwd: join(HOME, "projects/other"), costAmount: 2.0 })], undefined, { by: "dir" });
   assert.equal(result.kind, "grouped");
 });
 
 test("aggregate grouped by dir: unknown cwd lands in <unknown>", () => {
-  const result = aggregate([makeSession({ sessionId: "a", cwd: undefined, costAmount: 1.0 }), makeSession({ sessionId: "b", cwd: "/home/user/projects/myapp", costAmount: 2.0 })], undefined, { by: "dir" });
+  const result = aggregate([makeSession({ sessionId: "a", cwd: undefined, costAmount: 1.0 }), makeSession({ sessionId: "b", cwd: join(HOME, "projects/myapp"), costAmount: 2.0 })], undefined, { by: "dir" });
   assert.equal(result.kind, "grouped");
   const grouped = result as Extract<typeof result, { kind: "grouped" }>;
   assert.ok(grouped.groups.some(g => g.label === "<unknown>"));
@@ -207,12 +212,12 @@ test("aggregate grouped with --tokens: includes token totals from events", () =>
 });
 
 test("aggregate grouped with depth: rolls up directory paths", () => {
-  const result = aggregate([makeSession({ sessionId: "a", cwd: "/home/user/projects/myapp/src", costAmount: 1.0 }), makeSession({ sessionId: "b", cwd: "/home/user/projects/other", costAmount: 2.0 })], undefined, { by: "dir", depth: 1 });
+  const result = aggregate([makeSession({ sessionId: "a", cwd: join(HOME, "projects/myapp/src"), costAmount: 1.0 }), makeSession({ sessionId: "b", cwd: join(HOME, "projects/other"), costAmount: 2.0 })], undefined, { by: "dir", depth: 1 });
   assert.equal(result.kind, "grouped");
 });
 
 test("aggregate grouped with --dir: grouping root matches filter root", () => {
-  const result = aggregate([makeSession({ sessionId: "a", cwd: "/home/user/projects/myapp/src", costAmount: 1.0 })], undefined, { by: "dir", dir: "/home/user/projects" });
+  const result = aggregate([makeSession({ sessionId: "a", cwd: join(HOME, "projects/myapp/src"), costAmount: 1.0 })], undefined, { by: "dir", dir: join(HOME, "projects") });
   assert.equal(result.kind, "grouped");
 });
 
@@ -350,7 +355,7 @@ test("aggregate with --by session + --bucket day: sessions without cwd still app
   const result = aggregate(
     [
       makeSession({ sessionId: "a", cwd: undefined, costAmount: 1.0 }),
-      makeSession({ sessionId: "b", cwd: "/home/user/projects/myapp", costAmount: 2.0 }),
+      makeSession({ sessionId: "b", cwd: join(HOME, "projects/myapp"), costAmount: 2.0 }),
     ],
     [
       makeEvent({ sessionId: "a", cumulativeCost: 0.0, ts: "2026-06-15T11:00:00.000Z" }),
@@ -410,7 +415,7 @@ test("aggregate with filtered-out records returns total with zero cost", () => {
 });
 
 test("aggregate with --dir filter excludes sessions outside dir", () => {
-  const result = aggregate([makeSession({ sessionId: "a", cwd: "/home/user/projects/myapp", costAmount: 1.0 }), makeSession({ sessionId: "b", cwd: "/home/user/other", costAmount: 2.0 })], undefined, { dir: "/home/user/projects" });
+  const result = aggregate([makeSession({ sessionId: "a", cwd: join(HOME, "projects/myapp"), costAmount: 1.0 }), makeSession({ sessionId: "b", cwd: join(HOME, "other"), costAmount: 2.0 })], undefined, { dir: join(HOME, "projects") });
   assert.equal(result.kind, "total");
   assert.equal((result as any).row.costAmount, 1.0);
 });
@@ -464,12 +469,12 @@ test("aggregate timeSeries: sessions without events are omitted from buckets", (
 
 test("applyFilters dir prefix-match: ~/dev/hydra-acp does not match ~/dev/hydra-acp-other", () => {
   const records = [
-    makeSession({ sessionId: "a", cwd: "/home/user/dev/hydra-acp" }),
-    makeSession({ sessionId: "b", cwd: "/home/user/dev/hydra-acp-other" }),
-    makeSession({ sessionId: "c", cwd: "/home/user/dev/hydra-acp/src" }),
-    makeSession({ sessionId: "d", cwd: "/home/user/dev/hydra-acp-tools" }),
+    makeSession({ sessionId: "a", cwd: join(HOME, "dev/hydra-acp") }),
+    makeSession({ sessionId: "b", cwd: join(HOME, "dev/hydra-acp-other") }),
+    makeSession({ sessionId: "c", cwd: join(HOME, "dev/hydra-acp/src") }),
+    makeSession({ sessionId: "d", cwd: join(HOME, "dev/hydra-acp-tools") }),
   ];
-  const result = applyFilters(records, { dir: "/home/user/dev/hydra-acp" });
+  const result = applyFilters(records, { dir: join(HOME, "dev/hydra-acp") });
   assert.equal(result.length, 2);
   assert.ok(result.some(r => r.sessionId === "a"));
   assert.ok(result.some(r => r.sessionId === "c"));
