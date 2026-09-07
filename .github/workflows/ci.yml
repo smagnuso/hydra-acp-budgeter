@@ -16,12 +16,12 @@ jobs:
       # that would have shown whether it is platform- or version-shaped.
       fail-fast: false
       matrix:
-        # Node 20 is the floor `engines` claims, so it is tested everywhere
-        # that floor is claimed rather than on POSIX alone. Windows is
-        # where a version-specific difference in fs or child_process would
-        # otherwise surface unseen.
+        # 22 and 24, not the fleet's 20 and 22: src/cost/repair-io.ts
+        # imports node:sqlite, which does not exist before 22.5. `engines`
+        # said >=20 and was simply wrong — Node 20 cannot load this
+        # package at all, which CI proved on its first run.
         os: [ubuntu-latest, macos-latest, windows-latest]
-        node: [20, 22]
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
