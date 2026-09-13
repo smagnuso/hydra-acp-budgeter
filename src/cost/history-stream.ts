@@ -6,7 +6,7 @@ import { logger } from "../util/log.js";
 import type { SessionRecord } from "./session-store.js";
 import { sessionsDir } from "./session-store.js";
 import { filetypeForPath } from "./language.js";
-import { fetchToolBlob } from "./daemon-client.js";
+import { fetchSessionHistory, fetchToolBlob } from "./daemon-client.js";
 
 const log = logger("cost/history-stream");
 
@@ -229,9 +229,57 @@ function countLines(s: string): number {
   return n;
 }
 
+// Raw NDJSON lines for a session's history: from local disk for an
+// ordinary session, or from the daemon's history endpoint for a federated
+// one (session.remote set). A live-forwarded federated session has no
+// local history.jsonl at all — reading sessionsDir()/<foreign id>/
+// would just ENOENT (the id is colon-prefixed and can never collide with
+// a real local session directory), so the daemon fetch is the only
+// source. Both branches yield the same shape (one JSON object per line),
+// so the per-line parsing below doesn't need to know which it got.
+async function* sessionHistoryLines(
+  session: SessionRecord,
+): AsyncGenerator<string, void, undefined> {
+  if (session.remote !== undefined) {
+    const lines = await fetchSessionHistory(session.sessionId);
+    if (lines === undefined) {
+      return;
+    }
+    for (const line of lines) {
+      yield line;
+    }
+    return;
+  }
+
+  const historyPath = resolve(sessionsDir(), session.sessionId, "history.jsonl");
+  try {
+    statSync(historyPath);
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (e.code === "ENOENT") {
+      return;
+    }
+    log.debug(`stat failed for ${historyPath}: ${e.message}`);
+    return;
+  }
+
+  const stream = createReadStream(historyPath, { encoding: "utf8" });
+  const rl = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of rl) {
+      yield line;
+    }
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
+}
+
 /**
- * Stream history.jsonl line-by-line for the given session(s), yielding one
- * EditEvent per Edit/Write tool invocation that carries a diff payload.
+ * Stream a session's history line-by-line (local disk, or the daemon's
+ * history endpoint for a federated session — see sessionHistoryLines),
+ * yielding one EditEvent per Edit/Write tool invocation that carries a
+ * diff payload.
  *
  * A single tool invocation may surface multiple envelopes with diff
  * content — the agent often emits a speculative diff on `tool_call` (or
@@ -250,101 +298,76 @@ export async function* streamHistoryEditEvents(
   const sessionList = Array.isArray(sessions) ? sessions : [sessions];
 
   for (const session of sessionList) {
-    const historyPath = resolve(
-      sessionsDir(),
-      session.sessionId,
-      "history.jsonl",
-    );
-
-    try {
-      statSync(historyPath);
-    } catch (err) {
-      const e = err as NodeJS.ErrnoException;
-      if (e.code === "ENOENT") {
-        continue;
-      }
-      log.debug(`stat failed for ${historyPath}: ${e.message}`);
-      continue;
-    }
-
-    const stream = createReadStream(historyPath, { encoding: "utf8" });
-    const rl = createInterface({ input: stream, crlfDelay: Infinity });
-
     // Dedupe key: `${toolCallId}|${path}`. Value is the latest event for
     // that key. We emit at end-of-session so consumers see one event per
     // unique edit, ordered by first-seen position in the file.
     const latest = new Map<string, EditEvent>();
     const order: string[] = [];
 
-    try {
-      for await (const line of rl) {
-        if (line.length === 0) continue;
+    for await (const line of sessionHistoryLines(session)) {
+      if (line.length === 0) continue;
 
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(line);
-        } catch {
-          continue;
-        }
-
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-        const rec = parsed as Record<string, unknown>;
-        if (rec.method !== "session/update") continue;
-
-        const params = (rec.params ?? undefined) as
-          | Record<string, unknown>
-          | undefined;
-        if (!params || typeof params !== "object" || Array.isArray(params)) continue;
-
-        const update = (params.update ?? undefined) as
-          | Record<string, unknown>
-          | undefined;
-        if (!update || typeof update !== "object" || Array.isArray(update)) continue;
-
-        if (
-          update.sessionUpdate !== "tool_call" &&
-          update.sessionUpdate !== "tool_call_update"
-        ) {
-          continue;
-        }
-
-        const content = update.content;
-        if (!Array.isArray(content) || content.length === 0) continue;
-
-        const toolCallId =
-          typeof update.toolCallId === "string" ? update.toolCallId : "";
-        if (toolCallId === "") continue;
-
-        const ts = formatRecordedAt(rec);
-
-        for (const c of content) {
-          if (!c || typeof c !== "object" || Array.isArray(c)) continue;
-          const item = c as Record<string, unknown>;
-          if (item.type !== "diff") continue;
-
-          const path = typeof item.path === "string" ? item.path : "";
-          if (path === "") continue;
-
-          const oldText = await resolveDiffText(session.sessionId, item.oldText);
-          const newText = await resolveDiffText(session.sessionId, item.newText);
-
-          const key = `${toolCallId}|${path}`;
-          if (!latest.has(key)) {
-            order.push(key);
-          }
-          latest.set(key, {
-            sessionId: session.sessionId,
-            ts,
-            path,
-            filetype: filetypeForPath(path),
-            linesAdded: countLines(newText),
-            linesRemoved: countLines(oldText),
-          });
-        }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        continue;
       }
-    } finally {
-      rl.close();
-      stream.destroy();
+
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+      const rec = parsed as Record<string, unknown>;
+      if (rec.method !== "session/update") continue;
+
+      const params = (rec.params ?? undefined) as
+        | Record<string, unknown>
+        | undefined;
+      if (!params || typeof params !== "object" || Array.isArray(params)) continue;
+
+      const update = (params.update ?? undefined) as
+        | Record<string, unknown>
+        | undefined;
+      if (!update || typeof update !== "object" || Array.isArray(update)) continue;
+
+      if (
+        update.sessionUpdate !== "tool_call" &&
+        update.sessionUpdate !== "tool_call_update"
+      ) {
+        continue;
+      }
+
+      const content = update.content;
+      if (!Array.isArray(content) || content.length === 0) continue;
+
+      const toolCallId =
+        typeof update.toolCallId === "string" ? update.toolCallId : "";
+      if (toolCallId === "") continue;
+
+      const ts = formatRecordedAt(rec);
+
+      for (const c of content) {
+        if (!c || typeof c !== "object" || Array.isArray(c)) continue;
+        const item = c as Record<string, unknown>;
+        if (item.type !== "diff") continue;
+
+        const path = typeof item.path === "string" ? item.path : "";
+        if (path === "") continue;
+
+        const oldText = await resolveDiffText(session.sessionId, item.oldText);
+        const newText = await resolveDiffText(session.sessionId, item.newText);
+
+        const key = `${toolCallId}|${path}`;
+        if (!latest.has(key)) {
+          order.push(key);
+        }
+        latest.set(key, {
+          sessionId: session.sessionId,
+          ts,
+          path,
+          filetype: filetypeForPath(path),
+          linesAdded: countLines(newText),
+          linesRemoved: countLines(oldText),
+        });
+      }
     }
 
     for (const key of order) {

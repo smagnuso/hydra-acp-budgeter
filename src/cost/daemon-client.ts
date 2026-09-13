@@ -335,3 +335,39 @@ export async function fetchToolBlob(
   toolBlobCache.set(cacheKey, text);
   return text;
 }
+
+/**
+ * Fetch a session's recorded history as raw NDJSON lines via the daemon's
+ * `GET /v1/sessions/:id/history`. This is one of the `/v1/sessions/:id...`
+ * routes the daemon transparently forwards to the owning peer for a
+ * federated (colon-prefixed) session id — see PROTOCOL.md's federated-
+ * session-id section — so it's the only way to read a federated session's
+ * history at all: a live-forwarded session has no local history.jsonl to
+ * fall back to. Returns undefined when the daemon is unreachable,
+ * unauthenticated, or the session is unknown; caller treats that the same
+ * as "no history".
+ */
+export async function fetchSessionHistory(
+  sessionId: string,
+): Promise<string[] | undefined> {
+  const cfg = resolveConfig();
+  if (cfg === undefined) {
+    return undefined;
+  }
+  const url = `${cfg.daemonUrl.replace(/\/$/, "")}/v1/sessions/${encodeURIComponent(sessionId)}/history`;
+  let resp: Response;
+  try {
+    resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${cfg.token}` },
+    });
+  } catch (err) {
+    log.debug(`session history fetch failed (${url}): ${(err as Error).message}`);
+    return undefined;
+  }
+  if (!resp.ok) {
+    log.debug(`session history endpoint HTTP ${resp.status} for ${sessionId}`);
+    return undefined;
+  }
+  const text = await resp.text();
+  return text.split("\n").filter((line) => line.length > 0);
+}

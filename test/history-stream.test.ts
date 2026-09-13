@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import type { SessionRecord } from "../src/cost/session-store.js";
-import { streamHistoryEvents } from "../src/cost/history-stream.js";
+import { streamHistoryEvents, streamHistoryEditEvents } from "../src/cost/history-stream.js";
 
 function createTempSessionStore(): string {
   const base = mkdtempSync(resolve(tmpdir(), "budgeter-history-stream-"));
@@ -53,6 +53,28 @@ async function collectEvents(sessions: SessionRecord | SessionRecord[]): Promise
     events.push(ev);
   }
   return events;
+}
+
+async function collectEditEvents(sessions: SessionRecord | SessionRecord[]): Promise<any[]> {
+  const events = [];
+  for await (const ev of streamHistoryEditEvents(sessions)) {
+    events.push(ev);
+  }
+  return events;
+}
+
+function editUpdateLine(toolCallId: string, path: string, oldText: string, newText: string): string {
+  return JSON.stringify({
+    method: "session/update",
+    params: {
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        content: [{ type: "diff", path, oldText, newText }],
+      },
+    },
+    recordedAt: "2026-06-15T10:00:00.000Z",
+  });
 }
 
 let tempBase: string | null = null;
@@ -368,4 +390,52 @@ test("streamHistoryEvents currency propagates from cost.currency", async () => {
   const events = await collectEvents(session);
   assert.equal(events.length, 1);
   assert.equal(events[0].currency, "EUR");
+});
+
+test("streamHistoryEditEvents yields edit events from local history.jsonl for a non-federated session", async () => {
+  const sessionsPath = setupTemp();
+  const session = writeMeta(sessionsPath, "sess_edit");
+
+  writeHistory(sessionsPath, "sess_edit", [
+    editUpdateLine("tc1", "src/a.ts", "a\n", "a\nb\nc\n"),
+  ]);
+
+  const events = await collectEditEvents(session);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].path, "src/a.ts");
+  assert.equal(events[0].linesAdded, 3);
+  assert.equal(events[0].linesRemoved, 1);
+});
+
+test("streamHistoryEditEvents ignores a local history.jsonl for a federated session, even one that happens to exist at that id", async () => {
+  // Same-shaped hazard the federation fix targets: this repo's own
+  // sessions dir happens to have a file at the federated id's path (it
+  // never would in practice — real federated ids are colon-prefixed and
+  // never collide with a real local session — but proving the guard
+  // ignores one even when present is a stronger test than proving it
+  // does nothing when nothing is there).
+  const sessionsPath = setupTemp();
+  const prevToken = process.env.HYDRA_ACP_TOKEN;
+  delete process.env.HYDRA_ACP_TOKEN;
+  try {
+    const local = writeMeta(sessionsPath, "workbox:abc123");
+    writeHistory(sessionsPath, "workbox:abc123", [
+      editUpdateLine("tc1", "src/a.ts", "a\n", "a\nb\n"),
+    ]);
+
+    const federated: SessionRecord = { ...local, remote: "workbox" };
+    const events = await collectEditEvents(federated);
+
+    // No daemon token is resolvable in this test env (HYDRA_ACP_HOME
+    // points at a fresh temp dir with no auth-token, and the env var is
+    // cleared above), so the daemon fetch comes back empty — the point
+    // is that it never falls through to the local file that does exist.
+    assert.deepEqual(events, []);
+  } finally {
+    if (prevToken === undefined) {
+      delete process.env.HYDRA_ACP_TOKEN;
+    } else {
+      process.env.HYDRA_ACP_TOKEN = prevToken;
+    }
+  }
 });

@@ -216,14 +216,22 @@ async function runCost(argv: string[]): Promise<void> {
     const allRecords =
     (await listSessionsFromDaemon()) ?? scanSessions();
 
+    // Narrow to the requested host BEFORE enriching: a federated session's
+    // LOC now comes from a real network fetch (fetchSessionHistory in
+    // daemon-client.ts), so doing that for every federated row in the full
+    // list — most of which --host local (the default) is about to drop
+    // anyway — would be pure waste on a daemon with peers attached.
+    const hostFiltered = applyFilters(allRecords, { host: host ?? "local" });
+
     // LOC totals aren't carried by meta.json or the daemon's session list —
-    // stream history.jsonl for each survivor to populate locByFiletype.
-    // Done before filtering so a --min on loc has data to compare against.
+    // stream history for each survivor to populate locByFiletype. Done
+    // before the rest of the filters so a --min on loc has data to compare
+    // against.
     if (useLoc || by === "filetype") {
-        await enrichSessionsWithLoc(allRecords);
+        await enrichSessionsWithLoc(hostFiltered);
     }
 
-    const records = applyFilters(allRecords, {
+    const records = applyFilters(hostFiltered, {
         since: effectiveSince,
         dir,
         interactive: interactiveOpt,
