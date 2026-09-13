@@ -124,6 +124,12 @@ function rowToRecord(row: Record<string, unknown>): SessionRecord | undefined {
         : "";
   const upstreamSessionId =
     upstreamSessionIdRaw.length > 0 ? upstreamSessionIdRaw : undefined;
+  // Top-level only, unlike importedFromMachine/upstreamSessionId above:
+  // remote is a newer field (added when the daemon started stamping
+  // GET /v1/sessions with the federated-forward peer name), so there's no
+  // older _meta["hydra-acp"]-namespaced wire form of it to fall back to.
+  const remoteRaw = typeof row.remote === "string" ? row.remote : "";
+  const remote = remoteRaw.length > 0 ? remoteRaw : undefined;
 
   const usageTop = row.currentUsage as
     | { costAmount?: unknown; costCurrency?: unknown; used?: unknown }
@@ -151,6 +157,7 @@ function rowToRecord(row: Record<string, unknown>): SessionRecord | undefined {
     updatedAt: topUpdatedAt,
     importedFromMachine,
     upstreamSessionId,
+    remote,
   };
 }
 

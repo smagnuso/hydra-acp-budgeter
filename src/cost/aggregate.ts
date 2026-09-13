@@ -134,10 +134,12 @@ export interface FilterOptions {
   interactive?: boolean | undefined;
   /** Host filter, matching `hydra session list` semantics:
    *   "local"   — sessions created here OR imported and bound to a local
-   *               agent (upstreamSessionId set). Default.
+   *               agent (upstreamSessionId set). Excludes anything live on
+   *               a federated remote. Default.
    *   "all"     — every session, no filter.
-   *   <host>    — passive mirrors imported from <host> that haven't been
-   *               attached locally yet.
+   *   <host>    — either a live federated session on the `hydra remote`
+   *               named <host>, or a passive mirror imported from <host>
+   *               that hasn't been attached locally yet.
    * Undefined behaves like "all" (no filtering) for backwards-compat with
    * callers that don't pass the option. */
   host?: string;
@@ -164,6 +166,29 @@ function netLocForRecord(r: SessionRecord): number {
     }
   }
   return net;
+}
+
+// Mirrors cli's src/cli/session-host-filter.ts matchesHostFilter (same
+// bucket semantics, same "all" handled by the caller before this runs):
+// "local", or a name that may resolve to either a live `hydra remote`
+// (r.remote) or the older bundle-import breadcrumb (r.importedFromMachine).
+// If a remote happens to be registered under the same name as an old
+// import's origin machine, both match.
+function matchesHostFilter(
+  r: Pick<SessionRecord, "importedFromMachine" | "upstreamSessionId" | "remote">,
+  host: string,
+): boolean {
+  if (host === "local") {
+    return !r.remote && (!r.importedFromMachine || !!r.upstreamSessionId);
+  }
+  // A federated session that is itself a dormant, never-attached import
+  // mirror on the peer's own side isn't "happening on that remote" in any
+  // useful sense — same reasoning as isDormantOnPeer in cli's picker.ts.
+  const dormantOnPeer = !!r.importedFromMachine && !r.upstreamSessionId;
+  return (
+    (r.remote === host && !dormantOnPeer) ||
+    (r.importedFromMachine === host && !r.upstreamSessionId)
+  );
 }
 
 /** realpath normalization cache — shared across applyFilters calls. */
@@ -240,14 +265,8 @@ export function applyFilters(
     const host = opts.host;
     const filtered: SessionRecord[] = [];
     for (const r of result) {
-      if (host === "local") {
-        if (!r.importedFromMachine || !!r.upstreamSessionId) {
-          filtered.push(r);
-        }
-      } else {
-        if (r.importedFromMachine === host && !r.upstreamSessionId) {
-          filtered.push(r);
-        }
+      if (matchesHostFilter(r, host)) {
+        filtered.push(r);
       }
     }
     result = filtered;

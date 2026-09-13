@@ -97,6 +97,65 @@ test("applyFilters interactive filter", () => {
   assert.equal(r.length, 2);
 });
 
+test("applyFilters host=local excludes a federated remote session", () => {
+  const records = [
+    makeSession({ sessionId: "a" }),
+    { ...makeSession({ sessionId: "b" }), remote: "workbox" },
+  ];
+  const result = applyFilters(records, { host: "local" });
+  assert.equal(result.length, 1);
+  assert.equal(result[0].sessionId, "a");
+});
+
+test("applyFilters host=<name> matches a live federated session on that remote", () => {
+  const records = [
+    makeSession({ sessionId: "a" }),
+    { ...makeSession({ sessionId: "b" }), remote: "workbox" },
+    { ...makeSession({ sessionId: "c" }), remote: "other-box" },
+  ];
+  const result = applyFilters(records, { host: "workbox" });
+  assert.equal(result.length, 1);
+  assert.equal(result[0].sessionId, "b");
+});
+
+test("applyFilters host=<name> also matches a passive import mirror from that host", () => {
+  const records = [
+    { ...makeSession({ sessionId: "a" }), importedFromMachine: "old-laptop" },
+    makeSession({ sessionId: "b" }),
+  ];
+  const result = applyFilters(records, { host: "old-laptop" });
+  assert.equal(result.length, 1);
+  assert.equal(result[0].sessionId, "a");
+});
+
+test("applyFilters host=<name> excludes a federated session that's dormant on that peer", () => {
+  // remote === host would otherwise match, but importedFromMachine set with
+  // no upstreamSessionId means the peer itself reports this session as a
+  // passive, never-attached import mirror (from some third machine) — not
+  // "happening on workbox" in any useful sense.
+  const records = [
+    {
+      ...makeSession({ sessionId: "a" }),
+      remote: "workbox",
+      importedFromMachine: "some-other-machine",
+    },
+  ];
+  const result = applyFilters(records, { host: "workbox" });
+  assert.equal(result.length, 0);
+});
+
+test("applyFilters host=local still includes an import bound to a local agent", () => {
+  const records = [
+    {
+      ...makeSession({ sessionId: "a" }),
+      importedFromMachine: "old-laptop",
+      upstreamSessionId: "up_1",
+    },
+  ];
+  const result = applyFilters(records, { host: "local" });
+  assert.equal(result.length, 1);
+});
+
 test("applyFilters combines all filters", () => {
   const records = [
     makeSession({ sessionId: "a", cwd: join(HOME, "projects/myapp"), updatedAt: "2025-01-01T00:00:00.000Z", interactive: true }),

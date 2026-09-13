@@ -50,6 +50,14 @@ export interface SessionRecord {
    * user has attached to it here). Used together with importedFromMachine
    * to distinguish "local working copy of an import" from a passive mirror. */
   upstreamSessionId?: string;
+  /** Name of the `hydra remote` this session is live on, when it isn't this
+   * machine — set only by the daemon's GET /v1/sessions merge (see cli's
+   * session-forward.ts), never persisted into meta.json. Deliberately
+   * distinct from importedFromMachine: that one marks a cold bundle-import
+   * mirror, this one a session that's live and stays live on the peer. A
+   * local meta.json scan (scanSessions()) can never populate this — a
+   * live-forwarded federated session has no local meta.json to read. */
+  remote?: string;
   /** Per-language line-count totals derived from Edit/Write tool diffs in
    * history.jsonl. Populated lazily by enrichSessionsWithLoc(); undefined
    * means "not yet computed" (treated as zeros by aggregate). */

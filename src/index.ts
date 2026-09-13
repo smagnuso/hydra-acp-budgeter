@@ -53,9 +53,10 @@ Options:
   --dir <path>             Only include sessions under this directory prefix
   --interactive            Only include interactive sessions (default: include both)
   --host <name|local|all>  Filter sessions by host. "local" (default) shows sessions
-                           created here plus imports attached locally; "all" includes
-                           every session; <name> shows passive mirrors imported from
-                           that host.
+                           created here plus imports attached locally, excluding
+                           anything live on a federated remote; "all" includes every
+                           session; <name> shows sessions live on the hydra remote
+                           named <name>, plus passive mirrors imported from that host.
   --min <N>                Drop sessions whose active-metric value is <= N (default: 0)
   --histogram              Show an ASCII histogram bar next to each row (default on; implies --bucket hour if no bucket given)
   --no-histogram           Collapse to a single total row (also drops the default hourly bucket)
