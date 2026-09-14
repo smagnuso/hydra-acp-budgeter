@@ -229,6 +229,55 @@ test("aggregate grouped by dir: unknown cwd lands in <unknown>", () => {
   assert.ok(grouped.groups.some(g => g.label === "<unknown>"));
 });
 
+test("aggregate grouped by dir: a federated session's cwd never reaches realpathSync", () => {
+  // cwd is a path that doesn't exist locally on purpose — if this were
+  // ever handed to dirGroupLabel/realpathSync, the catch branch there
+  // would fall back to the raw resolved path as the label instead of
+  // naming the peer. On a shared-username box the same path could
+  // easily exist locally too and resolve to something real but wrong.
+  const result = aggregate(
+    [{ ...makeSession({ sessionId: "a", cwd: "/home/user/projects/myapp", costAmount: 1.0 }), remote: "workbox" }],
+    undefined,
+    { by: "dir" },
+  );
+  assert.equal(result.kind, "grouped");
+  const grouped = result as Extract<typeof result, { kind: "grouped" }>;
+  assert.ok(grouped.groups.some(g => g.label === "<workbox>"));
+});
+
+test("aggregate grouped by dir: a dormant import's cwd is labeled by origin, not realpathed", () => {
+  const result = aggregate(
+    [
+      {
+        ...makeSession({ sessionId: "a", cwd: "/home/user/projects/myapp", costAmount: 1.0 }),
+        importedFromMachine: "old-laptop",
+      },
+    ],
+    undefined,
+    { by: "dir" },
+  );
+  assert.equal(result.kind, "grouped");
+  const grouped = result as Extract<typeof result, { kind: "grouped" }>;
+  assert.ok(grouped.groups.some(g => g.label === "<old-laptop>"));
+});
+
+test("aggregate grouped by dir: a forked import (upstreamSessionId set) is grouped normally", () => {
+  const result = aggregate(
+    [
+      {
+        ...makeSession({ sessionId: "a", cwd: join(HOME, "projects/myapp"), costAmount: 1.0 }),
+        importedFromMachine: "old-laptop",
+        upstreamSessionId: "up_1",
+      },
+    ],
+    undefined,
+    { by: "dir" },
+  );
+  assert.equal(result.kind, "grouped");
+  const grouped = result as Extract<typeof result, { kind: "grouped" }>;
+  assert.ok(!grouped.groups.some(g => g.label === "<old-laptop>"));
+});
+
 test("aggregate grouped by session", () => {
   const result = aggregate([makeSession({ sessionId: "a", costAmount: 1.0 }), makeSession({ sessionId: "b", costAmount: 2.0 })], undefined, { by: "session" });
   assert.equal(result.kind, "grouped");

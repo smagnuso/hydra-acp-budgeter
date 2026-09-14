@@ -168,6 +168,30 @@ function netLocForRecord(r: SessionRecord): number {
   return net;
 }
 
+// Name of the machine whose files a session's cwd actually belongs to, or
+// undefined when the cwd is trustworthy as local. Same check as cli's own
+// foreignCwdOwner (src/tui/bar/types.ts) and matchesHostFilter's own
+// dormantOnPeer below: a live federated session (remote set), or a bundle
+// import nobody has forked into a real local cwd yet (importedFromMachine
+// set, upstreamSessionId unset — import only copies the conversation
+// record, not the project's files, so cwd is still whatever the
+// exporting machine had). Used to keep dirGroupLabel from ever calling
+// realpathSync on a path that belongs to another machine: same username
+// on both boxes means it often exists locally too, and would otherwise
+// silently mis-group/mislabel the session under an unrelated local
+// directory instead of just naming the real owner.
+function foreignCwdOwner(
+  r: Pick<SessionRecord, "remote" | "importedFromMachine" | "upstreamSessionId">,
+): string | undefined {
+  if (r.remote !== undefined) {
+    return r.remote;
+  }
+  if (r.importedFromMachine !== undefined && !r.upstreamSessionId) {
+    return r.importedFromMachine;
+  }
+  return undefined;
+}
+
 // Mirrors cli's src/cli/session-host-filter.ts matchesHostFilter (same
 // bucket semantics, same "all" handled by the caller before this runs):
 // "local", or a name that may resolve to either a live `hydra remote`
@@ -580,6 +604,10 @@ export function aggregate(
   // Grouping key function.
   const groupKey = (r: SessionRecord): string => {
     if (opts.by === "dir") {
+      const owner = foreignCwdOwner(r);
+      if (owner !== undefined) {
+        return `<${owner}>`;
+      }
       return dirGroupLabel(r.cwd, opts.depth, resolveDirRoot(opts));
     }
 
