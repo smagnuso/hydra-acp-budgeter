@@ -413,13 +413,16 @@ test("streamHistoryEditEvents ignores a local history.jsonl for a federated sess
   // never would in practice — real federated ids are colon-prefixed and
   // never collide with a real local session — but proving the guard
   // ignores one even when present is a stronger test than proving it
-  // does nothing when nothing is there).
+  // does nothing when nothing is there). The decoy id below drops the
+  // colon a real federated id would carry: colons aren't legal in a
+  // Windows path component, and the guard branches on session.remote,
+  // not on the id's shape, so this still exercises the same hazard.
   const sessionsPath = setupTemp();
   const prevToken = process.env.HYDRA_ACP_TOKEN;
   delete process.env.HYDRA_ACP_TOKEN;
   try {
-    const local = writeMeta(sessionsPath, "workbox:abc123");
-    writeHistory(sessionsPath, "workbox:abc123", [
+    const local = writeMeta(sessionsPath, "workbox-abc123");
+    writeHistory(sessionsPath, "workbox-abc123", [
       editUpdateLine("tc1", "src/a.ts", "a\n", "a\nb\n"),
     ]);
 
