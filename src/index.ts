@@ -221,7 +221,10 @@ async function runCost(argv: string[]): Promise<void> {
     // daemon-client.ts), so doing that for every federated row in the full
     // list — most of which --host local (the default) is about to drop
     // anyway — would be pure waste on a daemon with peers attached.
-    const hostFiltered = applyFilters(allRecords, { host: host ?? "local" });
+    const hostFiltered = applyFilters(allRecords, {
+        host: host ?? "local",
+        minMetric: useLoc ? "loc" : useTokens ? "tokens" : "cost",
+    });
 
     // LOC totals aren't carried by meta.json or the daemon's session list —
     // stream history for each survivor to populate locByFiletype. Done
