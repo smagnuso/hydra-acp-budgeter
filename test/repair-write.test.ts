@@ -704,3 +704,25 @@ test("a dormant session still reverts without needing --force", () => {
   assert.equal(readFileSync(resolve(sd, "history.jsonl"), "utf8"), before);
   rmSync(resolve(sd, ".."), { recursive: true, force: true });
 });
+
+// ---------------------------------------------------------------------------
+// resolveDaemonUrl: prefer the plain-HTTP loopback port when advertised.
+// ---------------------------------------------------------------------------
+
+test("resolveDaemonUrl prefers loopbackPort over host:port", async () => {
+  const { resolveDaemonUrl } = await import("../src/cost/daemon-client.js");
+  const dir = mkdtempSync(resolve(tmpdir(), "budgeter-pid-"));
+  const p = resolve(dir, "daemon.pid");
+  writeFileSync(p, JSON.stringify({ pid: 1, host: "0.0.0.0", port: 55514, loopbackPort: 39203 }));
+  assert.equal(resolveDaemonUrl(p), "http://127.0.0.1:39203");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("resolveDaemonUrl falls back to host:port for older daemons", async () => {
+  const { resolveDaemonUrl } = await import("../src/cost/daemon-client.js");
+  const dir = mkdtempSync(resolve(tmpdir(), "budgeter-pid-"));
+  const p = resolve(dir, "daemon.pid");
+  writeFileSync(p, JSON.stringify({ pid: 1, host: "127.0.0.1", port: 8123 }));
+  assert.equal(resolveDaemonUrl(p), "http://127.0.0.1:8123");
+  rmSync(dir, { recursive: true, force: true });
+});

@@ -37,19 +37,28 @@ function resolveToken(): string | undefined {
   return undefined;
 }
 
-function resolveDaemonUrl(): string {
+export function resolveDaemonUrl(
+  pidPath: string = resolve(
+    process.env.HYDRA_ACP_HOME ?? resolve(homedir(), ".hydra-acp"),
+    "daemon.pid",
+  ),
+): string {
   if (process.env.HYDRA_ACP_DAEMON_URL) {
     return process.env.HYDRA_ACP_DAEMON_URL;
   }
   // The daemon advertises its bound host/port in ~/.hydra-acp/daemon.pid
   // since it picks an ephemeral port by default.
-  const pidPath = resolve(
-    process.env.HYDRA_ACP_HOME ?? resolve(homedir(), ".hydra-acp"),
-    "daemon.pid",
-  );
   try {
     const text = readFileSync(pidPath, "utf8");
-    const obj = JSON.parse(text) as { host?: string; port?: number };
+    const obj = JSON.parse(text) as {
+      host?: string;
+      port?: number;
+      loopbackPort?: number;
+    };
+    // host:port is a TLS listener on newer daemons; plain HTTP lives on loopbackPort.
+    if (typeof obj.loopbackPort === "number") {
+      return `http://127.0.0.1:${obj.loopbackPort}`;
+    }
     if (typeof obj.host === "string" && typeof obj.port === "number") {
       return `http://${obj.host}:${obj.port}`;
     }
