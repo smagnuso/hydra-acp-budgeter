@@ -6,10 +6,13 @@ import type { SessionRecord } from "./session-store.js";
 
 const log = logger("cost/daemon-client");
 
-interface ClientConfig {
+/** Where and how to reach the daemon. Omit it to resolve from env / ~/.hydra-acp. */
+export interface DaemonConn {
   daemonUrl: string;
   token: string;
 }
+
+type ClientConfig = DaemonConn;
 
 // Token resolution order matches the cli's own pattern for local tools:
 //   HYDRA_ACP_TOKEN env  →  budgeter.conf HYDRA_TOKEN  →  ~/.hydra-acp/auth-token
@@ -69,6 +72,10 @@ export function resolveDaemonUrl(
     }
   }
   return "http://127.0.0.1:8765";
+}
+
+export function resolveDaemonConn(): DaemonConn | undefined {
+  return resolveConfig();
 }
 
 function resolveConfig(): ClientConfig | undefined {
@@ -174,10 +181,10 @@ function rowToRecord(row: Record<string, unknown>): SessionRecord | undefined {
 // auth token is available (no env var, no auth-token file) or when the
 // daemon refuses / is unreachable. The caller falls back to a direct
 // meta.json scan.
-export async function listSessionsFromDaemon(): Promise<
-  SessionRecord[] | undefined
-> {
-  const cfg = resolveConfig();
+export async function listSessionsFromDaemon(
+  conn?: DaemonConn,
+): Promise<SessionRecord[] | undefined> {
+  const cfg = conn ?? resolveConfig();
   if (cfg === undefined) {
     log.debug("no daemon token resolved; skipping daemon fetch");
     return undefined;
@@ -253,8 +260,9 @@ function rowToEvent(row: Record<string, unknown>): UsageEvent | undefined {
  */
 export async function fetchUsageEventsFromDaemon(
   since?: Date,
+  conn?: DaemonConn,
 ): Promise<UsageEvent[] | undefined> {
-  const cfg = resolveConfig();
+  const cfg = conn ?? resolveConfig();
   if (cfg === undefined) {
     return undefined;
   }
@@ -313,13 +321,14 @@ const toolBlobCache = new Map<string, string | null>();
 export async function fetchToolBlob(
   sessionId: string,
   hash: string,
+  conn?: DaemonConn,
 ): Promise<string | null> {
   const cacheKey = `${sessionId}|${hash}`;
   const cached = toolBlobCache.get(cacheKey);
   if (cached !== undefined) {
     return cached;
   }
-  const cfg = resolveConfig();
+  const cfg = conn ?? resolveConfig();
   if (cfg === undefined) {
     toolBlobCache.set(cacheKey, null);
     return null;
@@ -358,8 +367,9 @@ export async function fetchToolBlob(
  */
 export async function fetchSessionHistory(
   sessionId: string,
+  conn?: DaemonConn,
 ): Promise<string[] | undefined> {
-  const cfg = resolveConfig();
+  const cfg = conn ?? resolveConfig();
   if (cfg === undefined) {
     return undefined;
   }

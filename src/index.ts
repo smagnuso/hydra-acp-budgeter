@@ -6,11 +6,8 @@ import { loadConfig } from "./config.js";
 import { BudgeterBridge } from "./bridge.js";
 import { DEFAULT_RULE } from "./rule.js";
 import { logger, setDebug } from "./util/log.js";
-import { scanSessions, enrichSessionsWithLoc } from "./cost/session-store.js";
-import { listSessionsFromDaemon, fetchUsageEventsFromDaemon } from "./cost/daemon-client.js";
-import { streamHistoryEvents, streamHistoryEditEvents } from "./cost/history-stream.js";
-import type { CostEvent, EditEvent } from "./cost/history-stream.js";
-import { aggregate, applyFilters, parseSince } from "./cost/aggregate.js";
+import { parseSince } from "./cost/aggregate.js";
+import { computeUsage } from "./cost/usage.js";
 import { renderText, renderJson } from "./cost/format.js";
 
 const log = logger("main");
@@ -213,89 +210,19 @@ async function runCost(argv: string[]): Promise<void> {
     const useTokens = metric === "tokens";
     const minVal = minStr !== undefined ? parseFloat(minStr) : undefined;
 
-    const allRecords =
-    (await listSessionsFromDaemon()) ?? scanSessions();
-
-    // Narrow to the requested host BEFORE enriching: a federated session's
-    // LOC now comes from a real network fetch (fetchSessionHistory in
-    // daemon-client.ts), so doing that for every federated row in the full
-    // list — most of which --host local (the default) is about to drop
-    // anyway — would be pure waste on a daemon with peers attached.
-    const hostFiltered = applyFilters(allRecords, {
-        host: host ?? "local",
-        minMetric: useLoc ? "loc" : useTokens ? "tokens" : "cost",
-    });
-
-    // LOC totals aren't carried by meta.json or the daemon's session list —
-    // stream history for each survivor to populate locByFiletype. Done
-    // before the rest of the filters so a --min on loc has data to compare
-    // against.
-    if (useLoc || by === "filetype") {
-        await enrichSessionsWithLoc(hostFiltered);
-    }
-
-    const records = applyFilters(hostFiltered, {
-        since: effectiveSince,
-        dir,
-        interactive: interactiveOpt,
-        min: minVal,
-        minMetric: useLoc ? "loc" : useTokens ? "tokens" : "cost",
-        host: host ?? "local",
-    });
-
-    // Fetch per-turn usage events from the daemon. Each event carries
-    // cumulative cost + ts; the aggregator diffs them per session for
-    // proper windowing instead of lumping each session's full lifetime
-    // cost at meta.updatedAt. Every non-fast-path aggregate() case (Case
-    // 1/2 totals-and-groups included, not just the bucketed views) needs
-    // this to report in-window spend rather than lifetime spend.
-    //
-    // NOTE: we deliberately do NOT pass `since` to the daemon here. The
-    // daemon's `since` filter cuts events at the window boundary, which
-    // would make the first in-window event's cumulative get attributed
-    // entirely as a delta (re-creating the lump-at-boundary problem).
-    // The aggregator's bucketKey + records.updatedAt pre-filter already
-    // handles window slicing on its end.
-    let events: CostEvent[] | undefined = undefined;
-    const wireEvents = await fetchUsageEventsFromDaemon();
-    if (wireEvents !== undefined) {
-        events = wireEvents.map((e) => ({
-            sessionId: e.sessionId,
-            ts: e.ts,
-            deltaCost: 0,
-            cumulativeCost: e.costCumulative,
-            currency: e.costCurrency,
-            inputTokens: e.contextTokens,
-        }));
-    }
-
-    // For time-bucketed LOC views, stream EditEvents (with timestamps) for
-    // the survivor set. Non-bucketed LOC views use the locByFiletype totals
-    // that enrichSessionsWithLoc already populated, so no streaming here.
-    let editEvents: EditEvent[] | undefined = undefined;
-    if (useLoc && bucket !== undefined) {
-        const list: EditEvent[] = [];
-        for await (const ev of streamHistoryEditEvents(records)) {
-            list.push(ev);
-        }
-        editEvents = list;
-    }
-
     const depth = depthStr !== undefined ? parseInt(depthStr, 10) : undefined;
 
-    const opts = {
+    const agg = await computeUsage({
+        since: effectiveSince,
+        bucket: bucket as "hour" | "day" | "week" | "month" | "weekday" | undefined,
         by: by as "dir" | "session" | "model" | "agent" | "filetype" | undefined,
         depth,
-        bucket: bucket as "hour" | "day" | "week" | "month" | "weekday" | undefined,
-        since: effectiveSince,
-        interactive: interactiveOpt,
         dir,
-        tokens: useTokens,
-        loc: useLoc,
+        interactive: interactiveOpt,
+        host,
         min: minVal,
-    };
-
-    const agg = aggregate(records, events, opts, editEvents);
+        metric: useLoc ? "loc" : useTokens ? "tokens" : "cost",
+    });
 
     const windowLabel = computeWindowLabel({
         sinceRaw: since,

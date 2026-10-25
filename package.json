@@ -14,11 +14,19 @@
     "LICENSE"
   ],
   "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./usage": {
+      "types": "./dist/cost/usage.d.ts",
+      "default": "./dist/cost/usage.js"
+    },
+    "./package.json": "./package.json"
+  },
   "bin": {
     "hydra-acp-budgeter": "dist/index.js"
   },
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && tsc -p . --emitDeclarationOnly --declaration",
     "watch": "tsup --watch",
     "start": "node dist/index.js",
     "dev": "tsup && node dist/index.js",

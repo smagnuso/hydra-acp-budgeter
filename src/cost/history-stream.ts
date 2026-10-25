@@ -7,6 +7,7 @@ import type { SessionRecord } from "./session-store.js";
 import { sessionsDir } from "./session-store.js";
 import { filetypeForPath } from "./language.js";
 import { fetchSessionHistory, fetchToolBlob } from "./daemon-client.js";
+import type { DaemonConn } from "./daemon-client.js";
 
 const log = logger("cost/history-stream");
 
@@ -199,6 +200,7 @@ export async function* streamHistoryEvents(
 async function resolveDiffText(
   sessionId: string,
   value: unknown,
+  conn?: DaemonConn,
 ): Promise<string> {
   if (typeof value === "string") {
     return value;
@@ -206,7 +208,7 @@ async function resolveDiffText(
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const hash = (value as { __hydraBlob?: unknown }).__hydraBlob;
     if (typeof hash === "string") {
-      const body = await fetchToolBlob(sessionId, hash);
+      const body = await fetchToolBlob(sessionId, hash, conn);
       return body ?? "";
     }
   }
@@ -239,9 +241,10 @@ function countLines(s: string): number {
 // so the per-line parsing below doesn't need to know which it got.
 async function* sessionHistoryLines(
   session: SessionRecord,
+  conn?: DaemonConn,
 ): AsyncGenerator<string, void, undefined> {
   if (session.remote !== undefined) {
-    const lines = await fetchSessionHistory(session.sessionId);
+    const lines = await fetchSessionHistory(session.sessionId, conn);
     if (lines === undefined) {
       return;
     }
@@ -294,6 +297,7 @@ async function* sessionHistoryLines(
  */
 export async function* streamHistoryEditEvents(
   sessions: SessionRecord | SessionRecord[],
+  conn?: DaemonConn,
 ): AsyncGenerator<EditEvent, void, undefined> {
   const sessionList = Array.isArray(sessions) ? sessions : [sessions];
 
@@ -304,7 +308,7 @@ export async function* streamHistoryEditEvents(
     const latest = new Map<string, EditEvent>();
     const order: string[] = [];
 
-    for await (const line of sessionHistoryLines(session)) {
+    for await (const line of sessionHistoryLines(session, conn)) {
       if (line.length === 0) continue;
 
       let parsed: unknown;
@@ -352,8 +356,8 @@ export async function* streamHistoryEditEvents(
         const path = typeof item.path === "string" ? item.path : "";
         if (path === "") continue;
 
-        const oldText = await resolveDiffText(session.sessionId, item.oldText);
-        const newText = await resolveDiffText(session.sessionId, item.newText);
+        const oldText = await resolveDiffText(session.sessionId, item.oldText, conn);
+        const newText = await resolveDiffText(session.sessionId, item.newText, conn);
 
         const key = `${toolCallId}|${path}`;
         if (!latest.has(key)) {

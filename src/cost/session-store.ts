@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { homedir } from "node:os";
 import { logger } from "../util/log.js";
+import type { DaemonConn } from "./daemon-client.js";
 
 const log = logger("cost/session-store");
 
@@ -207,11 +208,12 @@ function readMetaJson(sessionPath: string): SessionRecord | undefined {
  */
 export async function enrichSessionsWithLoc(
   records: SessionRecord[],
+  conn?: DaemonConn,
 ): Promise<SessionRecord[]> {
   const { streamHistoryEditEvents } = await import("./history-stream.js");
   for (const r of records) {
     const map: Record<string, { added: number; removed: number }> = {};
-    for await (const ev of streamHistoryEditEvents(r)) {
+    for await (const ev of streamHistoryEditEvents(r, conn)) {
       const cur = map[ev.filetype] ?? { added: 0, removed: 0 };
       cur.added += ev.linesAdded;
       cur.removed += ev.linesRemoved;
