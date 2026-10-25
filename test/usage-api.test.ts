@@ -69,3 +69,46 @@ test("computeUsage uses the supplied connection, not the environment", async () 
 test("USAGE_API_VERSION is a positive integer", () => {
   assert.ok(Number.isInteger(USAGE_API_VERSION) && USAGE_API_VERSION > 0);
 });
+
+test("computeUsage with cacheMs fetches sessions and events once across queries", async () => {
+  const hits: string[] = [];
+  const now = new Date();
+  const server = createServer((req, res) => {
+    hits.push(req.url ?? "");
+    if (req.url?.startsWith("/v1/sessions/events")) {
+      res.end("");
+      return;
+    }
+    res.setHeader("content-type", "application/json");
+    res.end(
+      JSON.stringify({
+        sessions: [
+          {
+            sessionId: "s1",
+            cwd: "/tmp/proj",
+            agentId: "claude",
+            currentModel: "opus",
+            interactive: true,
+            updatedAt: now.toISOString(),
+            currentUsage: { costAmount: 2, costCurrency: "USD", used: 10 },
+          },
+        ],
+      }),
+    );
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as AddressInfo).port;
+  const conn = { daemonUrl: `http://127.0.0.1:${port}`, token: "cache-test-token" };
+  const since = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  try {
+    await computeUsage({ since, bucket: "hour", by: "model" }, conn, { cacheMs: 60_000 });
+    await computeUsage({ since, bucket: "hour", by: "agent" }, conn, { cacheMs: 60_000 });
+    await computeUsage({ since, bucket: "day", by: "dir", metric: "tokens" }, conn, { cacheMs: 60_000 });
+    assert.equal(hits.filter((u) => u.startsWith("/v1/sessions/events")).length, 1);
+    assert.equal(hits.filter((u) => u.startsWith("/v1/sessions?")).length, 1);
+    await computeUsage({ since, bucket: "hour" }, conn);
+    assert.equal(hits.filter((u) => u.startsWith("/v1/sessions/events")).length, 2);
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});
