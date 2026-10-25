@@ -218,6 +218,19 @@ hydra budgeter usage --metric tokens
 hydra budgeter usage --metric tokens --histogram
 ```
 
+### Stored usage events
+
+Per-turn cost comes from the daemon's usage events, and fetching the full history can take several seconds. Budgeter keeps what it has fetched in `~/.hydra-acp/budgeter-usage-events.jsonl` and, on later runs, asks the daemon only for events newer than the newest one stored (with a one-hour overlap, de-duplicated). The first run, and one run a day after that, fetch everything.
+
+```sh
+hydra budgeter cache status          # path, event count, newest event, last full sync
+hydra budgeter cache clear           # delete the file; the next run refetches everything
+hydra budgeter usage --refresh       # refetch everything now and replace the stored copy
+hydra budgeter usage --no-cache      # neither read nor write the file for this run
+```
+
+`hydra budgeter repair` clears the file itself whenever it changes a session's history. If the daemon can't be reached, the stored events are used as they are.
+
 ### Output formats
 
 **Text (default):**

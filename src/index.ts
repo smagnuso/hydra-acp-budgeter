@@ -8,6 +8,7 @@ import { DEFAULT_RULE } from "./rule.js";
 import { logger, setDebug } from "./util/log.js";
 import { parseSince } from "./cost/aggregate.js";
 import { computeUsage } from "./cost/usage.js";
+import { clearEventCache, eventCacheInfo } from "./cost/event-cache.js";
 import { renderText, renderJson } from "./cost/format.js";
 
 const log = logger("main");
@@ -60,7 +61,12 @@ Options:
   --metric <cost|tokens|loc>  Display metric (default: cost). "loc" counts net lines of code
                               from Edit/Write tool diffs in session history.
   --json                   Output as JSON
-  --help                   Show this help message`;
+  --refresh                Re-download every usage event instead of topping up the stored copy
+  --no-cache               Do not read or write the stored usage events
+  --help                   Show this help message
+
+Usage events are stored in ~/.hydra-acp/budgeter-usage-events.jsonl and only newer
+ones are fetched on later runs. Manage that file with "hydra budgeter cache".`;
 
 async function runCost(argv: string[]): Promise<void> {
     if (argv.includes("--help")) {
@@ -83,6 +89,8 @@ async function runCost(argv: string[]): Promise<void> {
     let metric: string | undefined;
     let json = false;
     let host: string | undefined;
+    let refresh = false;
+    let noCache = false;
     let bucketExplicit = false;
     let histogramExplicit = false;
 
@@ -125,6 +133,10 @@ async function runCost(argv: string[]): Promise<void> {
             metric = argv[i];
         } else if (arg === "--json") {
             json = true;
+        } else if (arg === "--refresh") {
+            refresh = true;
+        } else if (arg === "--no-cache") {
+            noCache = true;
         } else if (arg === "--host") {
             i += 1;
             host = argv[i];
@@ -222,7 +234,7 @@ async function runCost(argv: string[]): Promise<void> {
         host,
         min: minVal,
         metric: useLoc ? "loc" : useTokens ? "tokens" : "cost",
-    });
+    }, undefined, { persist: !noCache, refresh });
 
     const windowLabel = computeWindowLabel({
         sinceRaw: since,
@@ -317,6 +329,30 @@ function prettyRelative(spec: string): string | undefined {
     return `${amount} ${word}${amount === 1 ? "" : "s"}`;
 }
 
+function runCache(argv: string[]): void {
+    const sub = argv[0] ?? "status";
+    if (sub === "clear") {
+        const removed = clearEventCache();
+        process.stdout.write(removed ? "usage event cache cleared\n" : "no usage event cache to clear\n");
+        return;
+    }
+    if (sub === "status") {
+        const info = eventCacheInfo();
+        if (!info.exists) {
+            process.stdout.write(`no usage event cache (${info.path})\n`);
+            return;
+        }
+        process.stdout.write(
+            `${info.path}\n` +
+            `  ${info.events} events, ${(info.bytes / 1024).toFixed(0)} KB\n` +
+            `  newest event ${info.newest ?? "none"}\n` +
+            `  last full sync ${info.fullSyncAt ?? "unknown"}\n`,
+        );
+        return;
+    }
+    throw new Error(`unknown cache command "${sub}". Use "cache status" or "cache clear".`);
+}
+
 async function runTransformer(): Promise<void> {
     const config = loadConfig();
     setDebug(config.debug);
@@ -352,6 +388,7 @@ function printUsage(): void {
             `Usage:\n` +
       `  hydra budgeter [usage] <flags> Report historical cost/usage across sessions\n` +
       `  hydra budgeter reset           Zero the accumulated-cost baseline\n` +
+      `  hydra budgeter cache [status|clear]  Show or delete the stored usage events\n` +
             `\n` +
             `Flags:\n` +
             `  -v, --version                 Print version and exit\n` +
@@ -379,6 +416,10 @@ async function main(): Promise<void> {
     if (argv[0] === "repair") {
         const { runRepair } = await import("./cost/repair-cmd.js");
         await runRepair(argv.slice(1));
+        return;
+    }
+    if (argv[0] === "cache") {
+        runCache(argv.slice(1));
         return;
     }
     if (argv[0] === "usage" || argv[0] === "cost") {

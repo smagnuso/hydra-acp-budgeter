@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { aggregate, applyFilters } from "./aggregate.js";
 import type { BucketSpec, CostAggregate, GroupBy } from "./aggregate.js";
 import { fetchUsageEventsFromDaemon, listSessionsFromDaemon } from "./daemon-client.js";
+import { syncUsageEvents } from "./event-cache.js";
 import type { DaemonConn, UsageEvent } from "./daemon-client.js";
 import { streamHistoryEditEvents } from "./history-stream.js";
 import type { CostEvent, EditEvent } from "./history-stream.js";
@@ -11,6 +12,7 @@ import type { SessionRecord } from "./session-store.js";
 export type { AggregateRow, BucketSpec, CostAggregate, GroupBy, Group, TimeBucket } from "./aggregate.js";
 export type { DaemonConn } from "./daemon-client.js";
 export { parseSince } from "./aggregate.js";
+export { clearEventCache, eventCacheInfo } from "./event-cache.js";
 
 /**
  * Bumped only when the shape of CostAggregate (or UsageQuery semantics)
@@ -39,6 +41,13 @@ export interface UsageOptions {
    * only the first query pays for the daemon round trip.
    */
   cacheMs?: number;
+  /**
+   * Keep usage events in a file under the hydra home and fetch only newer
+   * ones each time, instead of re-downloading the full history.
+   */
+  persist?: boolean;
+  /** Ignore what is stored and fetch everything again. Implies a fresh snapshot. */
+  refresh?: boolean;
 }
 
 interface Snapshot {
@@ -61,17 +70,31 @@ function connKey(conn: DaemonConn | undefined): string {
   return `${conn.daemonUrl}|${t}`;
 }
 
-function snapshotFor(conn: DaemonConn | undefined, cacheMs: number): Snapshot {
+function loadEvents(
+  conn: DaemonConn | undefined,
+  opts: UsageOptions | undefined,
+): Promise<UsageEvent[] | undefined> {
+  if (opts?.persist) {
+    return syncUsageEvents(conn, { refresh: opts.refresh });
+  }
+  return fetchUsageEventsFromDaemon(undefined, conn);
+}
+
+function snapshotFor(
+  conn: DaemonConn | undefined,
+  cacheMs: number,
+  opts: UsageOptions | undefined,
+): Snapshot {
   const key = connKey(conn);
   const now = Date.now();
   const hit = snapshots.get(key);
-  if (hit !== undefined && now - hit.at < cacheMs) {
+  if (hit !== undefined && now - hit.at < cacheMs && !opts?.refresh) {
     return hit;
   }
   const fresh: Snapshot = {
     at: now,
     records: listSessionsFromDaemon(conn).then((r) => r ?? scanSessions()),
-    events: fetchUsageEventsFromDaemon(undefined, conn),
+    events: loadEvents(conn, opts),
   };
   const drop = (): void => {
     if (snapshots.get(key) === fresh) {
@@ -123,7 +146,7 @@ export async function computeUsage(
   const host = query.host ?? "local";
 
   const cacheMs = opts?.cacheMs ?? 0;
-  const snap = cacheMs > 0 ? snapshotFor(conn, cacheMs) : undefined;
+  const snap = cacheMs > 0 ? snapshotFor(conn, cacheMs, opts) : undefined;
   const allRecords = snap
     ? (await snap.records).map((r) => ({ ...r }))
     : (await listSessionsFromDaemon(conn)) ?? scanSessions();
@@ -166,7 +189,7 @@ export async function computeUsage(
   // `since` is deliberately not passed to the daemon: cutting events at the
   // window boundary would attribute the first in-window cumulative as a delta.
   let events: CostEvent[] | undefined = undefined;
-  const wireEvents = snap ? await snap.events : await fetchUsageEventsFromDaemon(undefined, conn);
+  const wireEvents = snap ? await snap.events : await loadEvents(conn, opts);
   if (wireEvents !== undefined) {
     events = wireEvents.map((e) => ({
       sessionId: e.sessionId,

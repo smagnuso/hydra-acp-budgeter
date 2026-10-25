@@ -21,6 +21,7 @@ import {
 } from "./repair-io.js";
 import { planSession, splitLedger, type RefusalReason, type RepairPlan } from "./repair-core.js";
 import { applyPlan, revertSession, reshapeSession, ALGO_VERSION } from "./repair-write.js";
+import { clearEventCache } from "./event-cache.js";
 
 export const REPAIR_HELP = `Usage: hydra-acp-budgeter repair [OPTIONS]
 
@@ -289,6 +290,9 @@ export async function runRepair(argv: string[]): Promise<void> {
       process.stdout.write(`reverted ${basename(dir)}  (${r.rowsReverted} rows)\n`);
     }
     process.stdout.write(`\n${n} session(s) reverted, ${rows} rows restored.\n`);
+    if (n > 0) {
+      clearEventCache();
+    }
     if (refusedN > 0) {
       process.stdout.write(
         `${refusedN} session(s) refused: they kept working after their repair, so a\n` +
@@ -349,6 +353,9 @@ export async function runRepair(argv: string[]): Promise<void> {
         (opts.apply ? `` : `dry run — nothing written. Re-run with --apply.\n`) +
         `net total change $${delta.toFixed(2)} (shape-only for sessions whose total was already right)\n`,
     );
+    if (opts.apply && fixed > 0) {
+      clearEventCache();
+    }
     return;
   }
   process.stderr.write(`indexing ${dbs.length} OpenCode database(s)…\n`);
@@ -468,6 +475,9 @@ export async function runRepair(argv: string[]): Promise<void> {
     }
   }
   process.stdout.write(`\napplied to ${applied} session(s), ${rowsTotal} rows rewritten.\n`);
+  if (applied > 0) {
+    clearEventCache();
+  }
   for (const f of failures) {
     process.stderr.write(`FAILED ${f}\n`);
   }
