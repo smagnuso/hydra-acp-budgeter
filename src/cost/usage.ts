@@ -46,21 +46,25 @@ export async function computeUsage(
 
   const allRecords = (await listSessionsFromDaemon(conn)) ?? scanSessions();
 
-  // Narrow by host before enriching: LOC for a federated row is a network
-  // fetch, so doing it for rows --host is about to drop is pure waste.
-  const hostFiltered = applyFilters(allRecords, { host, minMetric });
-
-  if (useLoc || query.by === "filetype") {
-    await enrichSessionsWithLoc(hostFiltered, conn);
-  }
-
-  const records = applyFilters(hostFiltered, {
+  // Narrow before enriching: LOC means streaming each row's history (a
+  // network fetch for federated rows), so only the survivors should pay.
+  // The metric floor is skipped for loc since it isn't known until enrichment.
+  const narrowed = applyFilters(allRecords, {
     since: query.since,
     dir: query.dir,
     interactive: query.interactive,
+    host,
+    minMetric,
+    min: useLoc ? -1 : undefined,
+  });
+
+  if (useLoc || query.by === "filetype") {
+    await enrichSessionsWithLoc(narrowed, conn);
+  }
+
+  const records = applyFilters(narrowed, {
     min: query.min,
     minMetric,
-    host,
   });
 
   // `since` is deliberately not passed to the daemon: cutting events at the
