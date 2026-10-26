@@ -647,3 +647,29 @@ test("aggregate fast path: multiple sessions with events still returns record-on
   // All three sessions summed from meta.json only
   assert.equal((result as any).row.costAmount, 6.0);
 });
+
+test("aggregate --by session labels each group with its model, agent and dir", () => {
+  const recs = [
+    makeSession({ sessionId: "hydra_session_aaa", model: "opus", agentId: "claude", cwd: join(HOME, "projects/myapp"), costAmount: 2 }),
+    makeSession({ sessionId: "hydra_session_bbb", model: "", agentId: "", cwd: join(HOME, "projects/other"), costAmount: 3 }),
+  ];
+  const out = aggregate(recs, undefined, { by: "session", since: new Date("2026-01-01T00:00:00Z") });
+  assert.equal(out.kind, "grouped");
+  if (out.kind !== "grouped") {
+    return;
+  }
+  const a = out.groups.find((g) => g.label === "aaa");
+  const b = out.groups.find((g) => g.label === "bbb");
+  assert.deepEqual({ model: a?.attrs?.model, agent: a?.attrs?.agent }, { model: "opus", agent: "claude" });
+  assert.deepEqual({ model: b?.attrs?.model, agent: b?.attrs?.agent }, { model: "<unknown>", agent: "<unknown>" });
+  assert.ok(a?.attrs?.dir && b?.attrs?.dir && a.attrs.dir !== b.attrs.dir);
+});
+
+test("aggregate leaves attrs off groupings other than session", () => {
+  const recs = [makeSession({ sessionId: "hydra_session_aaa", costAmount: 2 })];
+  const out = aggregate(recs, undefined, { by: "model", since: new Date("2026-01-01T00:00:00Z") });
+  assert.equal(out.kind, "grouped");
+  if (out.kind === "grouped") {
+    assert.equal(out.groups[0]?.attrs, undefined);
+  }
+});

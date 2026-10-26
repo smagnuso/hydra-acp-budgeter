@@ -50,9 +50,19 @@ export interface TimeBucket {
 }
 
 /** A group (e.g. a directory) containing either rows or time buckets. */
+/** The model, agent and directory a session sits under in the other groupings. */
+export interface GroupAttrs {
+  model: string;
+  agent: string;
+  dir: string;
+}
+
 export interface Group<T> {
   label: string;
   items: T[];
+  /** Set on --by session groups so a caller can filter sessions by the
+   * labels the model/agent/dir groupings use. */
+  attrs?: GroupAttrs;
   /** Unique sessions contributing to this group across all its items. Set
    * by the aggregator so headers can display "N sessions" without
    * double-counting sessions that span multiple items/buckets. */
@@ -437,7 +447,7 @@ function dirGroupLabel(
  * Slow path — collects history events for the survivor set to compute
  * per-session deltas, then groups or buckets those events.
  */
-export function aggregate(
+function aggregateCore(
   records: SessionRecord[],
   events?: CostEvent[],
   opts: AggregateOptions = {},
@@ -1213,4 +1223,42 @@ export function aggregate(
   timeSeries.sort(compareBuckets);
 
   return { kind: "timeSeries", timeSeries, currency, totalSessions: uniqueSessions.size };
+}
+
+function sessionGroupLabel(sessionId: string): string {
+  return sessionId.startsWith("hydra_session_")
+    ? sessionId.slice("hydra_session_".length)
+    : sessionId;
+}
+
+/**
+ * Aggregate session records and usage events. For --by session, each group
+ * also carries the model, agent and directory labels the other groupings
+ * would put that session under.
+ */
+export function aggregate(
+  records: SessionRecord[],
+  events?: CostEvent[],
+  opts: AggregateOptions = {},
+  editEvents?: EditEvent[],
+): CostAggregate {
+  const out = aggregateCore(records, events, opts, editEvents);
+  if (opts.by !== "session" || (out.kind !== "grouped" && out.kind !== "timeSeriesGrouped")) {
+    return out;
+  }
+  const byLabel = new Map(records.map((r) => [sessionGroupLabel(r.sessionId), r]));
+  const root = resolveDirRoot(opts);
+  for (const g of out.groups as Array<Group<unknown>>) {
+    const r = byLabel.get(g.label);
+    if (r === undefined) {
+      continue;
+    }
+    const owner = foreignCwdOwner(r);
+    g.attrs = {
+      model: r.model === "" ? "<unknown>" : r.model,
+      agent: r.agentId === "" ? "<unknown>" : r.agentId,
+      dir: owner !== undefined ? `<${owner}>` : dirGroupLabel(r.cwd, opts.depth, root),
+    };
+  }
+  return out;
 }
