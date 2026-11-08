@@ -82,6 +82,25 @@ Ships as `hydra-acp-budgeter` on PATH. Registered via
   the current agent-reported total and subtracts on subsequent updates.
   Editing this to literally zero the counter will silently double-charge
   on the next `usage_update`.
+- **Treat every path as possibly Windows-shaped, whatever host this runs on.**
+  A cwd, a tool-call path or a session field can arrive as `C:\x`, `C:/x`, a
+  mix, or UNC from a daemon on Windows, even when this code runs on Linux. Never
+  split, prefix-match or find the last separator with a hard-coded `/` on a
+  filesystem path; use `path.relative`, `isAbsolute` and `basename` (URLs and
+  ids are not paths). Containment is `path.relative` plus a first-segment `..`
+  test, never a string prefix. Windows shows full paths, never `~`; expand `~`,
+  `~/` and `~\` on input only. The full checklist (spawning, renames, signals,
+  testing) is in the `hydra-acp/cli` AGENTS.md under "Treat every path as
+  possibly Windows-shaped".
+- **Paths in `src/cost` go through the platform-parameterised helpers**
+  (`splitRelPath`, `shortenHome`); `path.relative()` and `resolve()` return
+  backslashes on Windows, so a hand-written `split("/")` or `startsWith(home + "/")`
+  silently stops grouping. On Windows the usage report shows full paths, never
+  `~`.
+- **Write-then-rename of files the daemon or a scanner may hold open goes through
+  `renameWithRetry`** (`cost/rename-retry.ts`). A bare `renameSync` fails with
+  EPERM or EBUSY on Windows. It retries EPERM, EBUSY and EACCES only, and removes
+  the temp file when it gives up.
 
 ## Updating this file
 
