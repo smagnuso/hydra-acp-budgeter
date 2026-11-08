@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
+import { renameWithRetry } from "./rename-retry.js";
 import { logger } from "../util/log.js";
 import { fetchUsageEventsFromDaemon } from "./daemon-client.js";
 import type { DaemonConn, UsageEvent } from "./daemon-client.js";
@@ -77,7 +78,7 @@ function writeCache(cache: CacheFile): void {
   try {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(tmp, out.join("\n") + "\n");
-    renameSync(tmp, path);
+    renameWithRetry(tmp, path);
   } catch (err) {
     log.debug(`event cache write failed: ${(err as Error).message}`);
     try {

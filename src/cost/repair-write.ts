@@ -25,9 +25,10 @@
 // Writes go to a temp file and are renamed, so a crash mid-write leaves the
 // original intact.
 
-import { renameSync, writeFileSync, readFileSync, statSync, utimesSync } from "node:fs";
+import { writeFileSync, readFileSync, statSync, utimesSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 import { resolve } from "node:path";
+import { renameWithRetry } from "./rename-retry.js";
 import { logger } from "../util/log.js";
 import type { LedgerSplit, RepairPlan } from "./repair-core.js";
 import {
@@ -140,7 +141,7 @@ function writeFileAtomic(path: string, body: Buffer | string): void {
     prior = undefined;
   }
   writeFileSync(tmp, body, { mode: 0o600 });
-  renameSync(tmp, path);
+  renameWithRetry(tmp, path);
   if (prior) {
     utimesSync(path, prior.atime, prior.mtime);
   }
