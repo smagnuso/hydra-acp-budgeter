@@ -18,7 +18,7 @@ const BASENAME_LABELS: Record<string, string> = {
 };
 
 export function filetypeForPath(path: string): string {
-  const lastSlash = path.lastIndexOf("/");
+  const lastSlash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
   const base = lastSlash >= 0 ? path.slice(lastSlash + 1) : path;
 
   const exact = BASENAME_LABELS[base];

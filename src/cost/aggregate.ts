@@ -378,6 +378,33 @@ function resolveDirRoot(opts: AggregateOptions): string {
   return resolve(homedir());
 }
 
+// On win32 the full path is kept: "~" is not understood outside PowerShell
+// and these labels get copied into other tools.
+export function shortenHome(
+  resolvedCwd: string,
+  home: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform === "win32") {
+    return resolvedCwd;
+  }
+  if (resolvedCwd === home) {
+    return "~";
+  }
+  if (resolvedCwd.startsWith(home + "/")) {
+    return "~/" + resolvedCwd.slice(home.length + 1);
+  }
+  return resolvedCwd;
+}
+
+// Split a path.relative() result into segments; win32 results use backslashes.
+export function splitRelPath(
+  relPath: string,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  return platform === "win32" ? relPath.split(/[\\/]/) : relPath.split("/");
+}
+
 /**
  * Compute a directory-group label for a session's cwd.
  *
@@ -398,13 +425,7 @@ function dirGroupLabel(
 
   if (depth === undefined) {
     const home = realpathCached(resolve(homedir()));
-    if (resolvedCwd === home) {
-      return "~";
-    }
-    if (resolvedCwd.startsWith(home + "/")) {
-      return "~/" + resolvedCwd.slice(home.length + 1);
-    }
-    return resolvedCwd;
+    return shortenHome(resolvedCwd, home);
   }
 
   const resolvedRoot = realpathCached(resolve(root));
@@ -418,7 +439,7 @@ function dirGroupLabel(
     return "<unknown>";
   }
 
-  const parts = relPath.split("/");
+  const parts = splitRelPath(relPath);
 
   if (parts.length === 0) {
     return "<root>";
