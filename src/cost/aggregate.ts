@@ -21,6 +21,14 @@ export type GroupBy = "dir" | "session" | "model" | "agent" | "filetype";
 // CostAggregate — expressive enough for T4 to render any output shape
 // ---------------------------------------------------------------------------
 
+/** Tokens added to the context since the previous event; drops (compaction) count as 0. */
+function contextGrowth(prev: number | undefined, ev: CostEvent): number {
+  if (prev === undefined || ev.contextTokens === undefined) {
+    return 0;
+  }
+  return Math.max(0, ev.contextTokens - prev);
+}
+
 /** A single row of aggregated cost data. */
 export interface AggregateRow {
   label: string;
@@ -803,10 +811,14 @@ function aggregateCore(
 
       if (sessionEvents === undefined || sessionEvents.length < 2) {
         totalCost += r.costAmount;
+        if (opts.tokens === true) {
+          totalInputTokens += r.contextTokens;
+        }
         contributingSessions++;
       } else {
         const first = sessionEvents[0] as CostEvent;
         let prev = first.cumulativeCost;
+        let prevCtx = first.contextTokens;
         let contributed = false;
 
         for (let i = 1; i < sessionEvents.length; i++) {
@@ -814,9 +826,12 @@ function aggregateCore(
           if (ev === undefined) continue;
           const delta = Math.max(0, ev.cumulativeCost - prev);
           prev = ev.cumulativeCost;
+          const growth = contextGrowth(prevCtx, ev);
+          prevCtx = ev.contextTokens ?? prevCtx;
           if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) {
             continue;
           }
+          totalInputTokens += growth;
           totalCost += delta;
           contributed = true;
         }
@@ -887,7 +902,9 @@ function aggregateCore(
 
       if (opts.tokens === true) {
         if (grp.rows.inputTokens === undefined) grp.rows.inputTokens = 0;
-        grp.rows.inputTokens += r.contextTokens;
+        if ((eventsBySession.get(r.sessionId)?.length ?? 0) < 2) {
+          grp.rows.inputTokens += r.contextTokens;
+        }
       }
       if (opts.loc === true) {
         const map = r.locByFiletype;
@@ -916,6 +933,7 @@ function aggregateCore(
       } else {
         const first = sessionEvents[0] as CostEvent;
         let prev = first.cumulativeCost;
+        let prevCtx = first.contextTokens;
         let contributed = false;
 
         for (let i = 1; i < sessionEvents.length; i++) {
@@ -923,8 +941,13 @@ function aggregateCore(
           if (ev === undefined) continue;
           const delta = Math.max(0, ev.cumulativeCost - prev);
           prev = ev.cumulativeCost;
+          const growth = contextGrowth(prevCtx, ev);
+          prevCtx = ev.contextTokens ?? prevCtx;
           if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) {
             continue;
+          }
+          if (opts.tokens === true) {
+            grp.rows.inputTokens = (grp.rows.inputTokens ?? 0) + growth;
           }
           grp.rows.costAmount += delta;
           grp.rows.deltaCost! += delta;
@@ -998,6 +1021,7 @@ function aggregateCore(
     groupBuckets: Map<string, TimeBucket>,
     ev: CostEvent,
     delta: number,
+    tokenGrowth: number,
   ): void => {
     const bk = bucketKey(ev.ts);
     let bucket = groupBuckets.get(bk) as
@@ -1011,12 +1035,7 @@ function aggregateCore(
     bucket.deltaCost += delta;
     trackSession(bucket, ev.sessionId);
     if (opts.tokens === true) {
-      if (
-        bucket.inputTokens === undefined ||
-        (ev.inputTokens ?? 0) > bucket.inputTokens
-      ) {
-        bucket.inputTokens = ev.inputTokens ?? bucket.inputTokens ?? 0;
-      }
+      bucket.inputTokens = (bucket.inputTokens ?? 0) + (ev.inputTokens ?? 0) + tokenGrowth;
     }
   };
 
@@ -1177,15 +1196,18 @@ function aggregateCore(
       // that pre-existed T1's per-turn recording would otherwise dump
       // a huge "pre-recording" lump into the first event's bucket.
       let prev = first.cumulativeCost;
+      let prevCtx = first.contextTokens;
       for (let i = 1; i < sessionEvents.length; i++) {
         const ev = sessionEvents[i];
         if (ev === undefined) continue;
         const delta = Math.max(0, ev.cumulativeCost - prev);
         prev = ev.cumulativeCost;
+        const growth = contextGrowth(prevCtx, ev);
+        prevCtx = ev.contextTokens ?? prevCtx;
         if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) {
           continue;
         }
-        accrueEvent(groupBuckets, ev, delta);
+        accrueEvent(groupBuckets, ev, delta, growth);
       }
     }
 
@@ -1220,16 +1242,19 @@ function aggregateCore(
     // First event's cumulative is the baseline; deltas start at #2.
     // See comment in case 3 above for rationale.
     let prev = first.cumulativeCost;
+    let prevCtx = first.contextTokens;
     let contributed = false;
     for (let i = 1; i < sessionEvents.length; i++) {
       const ev = sessionEvents[i];
       if (ev === undefined) continue;
       const delta = Math.max(0, ev.cumulativeCost - prev);
       prev = ev.cumulativeCost;
+      const growth = contextGrowth(prevCtx, ev);
+      prevCtx = ev.contextTokens ?? prevCtx;
       if (effectiveSince !== undefined && new Date(ev.ts) < effectiveSince) {
         continue;
       }
-      accrueEvent(bucketsMap, ev, delta);
+      accrueEvent(bucketsMap, ev, delta, growth);
       contributed = true;
     }
     if (contributed) {

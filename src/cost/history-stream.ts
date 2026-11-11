@@ -18,6 +18,8 @@ export interface CostEvent {
   deltaCost: number;
   cumulativeCost: number;
   currency: string;
+  /** Context-window size gauge after this event; aggregated as growth. */
+  contextTokens?: number;
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;

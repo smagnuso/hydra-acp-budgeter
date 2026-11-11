@@ -32,6 +32,7 @@ function makeEvent(overrides: Partial<CostEvent>): CostEvent {
     deltaCost: typeof overrides.deltaCost === "number" ? overrides.deltaCost : 0.1,
     cumulativeCost: typeof overrides.cumulativeCost === "number" ? overrides.cumulativeCost : 1.0,
     currency: overrides.currency as string | undefined,
+    ...(overrides.contextTokens !== undefined && { contextTokens: overrides.contextTokens }),
     ...(overrides.inputTokens !== undefined && { inputTokens: overrides.inputTokens }),
     ...(overrides.outputTokens !== undefined && { outputTokens: overrides.outputTokens }),
   };
@@ -672,4 +673,22 @@ test("aggregate leaves attrs off groupings other than session", () => {
   if (out.kind === "grouped") {
     assert.equal(out.groups[0]?.attrs, undefined);
   }
+});
+
+test("bucketed tokens sum context growth per day, ignoring compaction drops", () => {
+  const ev = (ts: string, cost: number, contextTokens: number) =>
+    makeEvent({ sessionId: "a", ts, cumulativeCost: cost, contextTokens });
+  const result = aggregate(
+    [makeSession({ sessionId: "a", costAmount: 1.0 })],
+    [
+      ev("2026-06-14T10:00:00", 0.1, 100),
+      ev("2026-06-14T11:00:00", 0.2, 150),
+      ev("2026-06-15T10:00:00", 0.3, 40),
+      ev("2026-06-15T11:00:00", 0.4, 100),
+    ],
+    { by: "agent", bucket: "day", tokens: true, since: new Date("2025-01-01") },
+  );
+  assert.equal(result.kind, "timeSeriesGrouped");
+  const items = (result as Extract<typeof result, { kind: "timeSeriesGrouped" }>).groups[0]!.items;
+  assert.deepEqual(items.map((i) => i.inputTokens), [50, 60]);
 });

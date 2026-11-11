@@ -197,7 +197,7 @@ export async function computeUsage(
       deltaCost: 0,
       cumulativeCost: e.costCumulative,
       currency: e.costCurrency,
-      inputTokens: e.contextTokens,
+      contextTokens: e.contextTokens,
     }));
   }
 
